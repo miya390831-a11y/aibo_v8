@@ -18,3 +18,9 @@ aibo_bridge/bot/__pycache__/
 
 # tmux 一時ファイル
 *.tmux.log
+
+# === Cursor くん作業用一時 Python ファイル ===
+_extract_and_decode_bridge.py
+_decode_bridge.py
+*.tmp.py
+_*.py
