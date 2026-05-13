@@ -1,0 +1,20 @@
+# Next.js frontend (Cursor #3b)
+frontend/node_modules/
+frontend/.next/
+frontend/.env.local
+frontend/.env*.local
+
+# === AIBO Bridge (Codespaces Remote Command Bridge) ===
+aibo_bridge/config/.env
+aibo_bridge/config/*.json
+aibo_bridge/logs/
+aibo_bridge/inbox/
+aibo_bridge/outbox/
+aibo_bridge/bot/venv/
+aibo_bridge/bot/__pycache__/
+
+# Cline configs (API キー含む可能性)
+.cline-configs/
+
+# tmux 一時ファイル
+*.tmux.log
