@@ -24,3 +24,7 @@ _extract_and_decode_bridge.py
 _decode_bridge.py
 *.tmp.py
 _*.py
+
+aibo_bridge/.tokens_tmp.txt
+aibo_bridge/.tokens_*.txt
+aibo_bridge/.runpod_key_tmp.txt
