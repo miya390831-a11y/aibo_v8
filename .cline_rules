@@ -1,4 +1,4 @@
-# 🤖 Cline 動作ルール設定（AIBO v7・4拠点同期）
+# 🤖 Cline 動作ルール設定（AIBO v7・完全版）
 
 ## 📋 基本ルール
 
@@ -49,19 +49,16 @@
 ### **同期コマンド（短縮版）**
 
 ```powershell
-# Cline にこれを指示すれば自動実行
 $master = "C:\Users\yuuki\aibo_v7"
 $dl1 = "C:\Users\yuuki\Downloads\AIBOV7"
 $dl2 = "C:\Users\yuuki\Downloads\AIBOV7\3a"
 $gd = "G:\マイドライブ\aibo_v7"
 
-# git push
 cd $master
 git add .
 git commit -m "auto-sync"
 git push origin main
 
-# robocopy 同期
 robocopy $master $dl1 /MIR /NP
 robocopy $master $dl2 /MIR /NP
 robocopy $master $gd /MIR /NP
@@ -132,6 +129,130 @@ Cline への指示：
 
 ---
 
+## 🐳 RunPod UI デプロイ自動化ルール
+
+### **目的**
+
+「UI を RunPod で更新してください」というコマンド 1 つで、
+Docker ビルド → Push → RunPod Endpoint 更新を完全自動化
+
+### **前提条件**
+
+```
+【環境要件】
+✅ Docker Desktop がローカルにインストール・起動済み
+✅ GitHub CLI（gh）がインストール済み
+✅ GitHub にログイン済み（gh auth login）
+✅ ghcr.io にアクセス可能（GitHub Container Registry）
+✅ RunPod アカウント・API キー準備済み
+✅ frontend フォルダに Dockerfile・docker-entrypoint.sh 配置済み
+```
+
+### 🎯 「UI を RunPod で更新してください」コマンド実行フロー
+
+#### Phase 1: 前提チェック（自動実行）
+
+```
+1️⃣ Docker Desktop 起動確認 → docker --version
+2️⃣ GitHub ログイン確認 → gh auth status
+3️⃣ frontend フォルダ確認 → Dockerfile・docker-entrypoint.sh 存在確認
+4️⃣ .git フォルダ確認 → git リポジトリ確認
+```
+
+#### Phase 2: git pull（最新コード取得）
+
+```
+5️⃣ git pull origin master → 最新コード取得
+```
+
+#### Phase 3: Docker ビルド
+
+```
+6️⃣ cd C:\Users\yuuki\aibo_v7\frontend
+7️⃣ docker build -t ghcr.io/miya390831-a11y/aibo-studio-v8-ui:latest .
+```
+
+#### Phase 4: GitHub Container Registry ログイン
+
+```
+8️⃣ echo $(gh auth token) | docker login ghcr.io -u miya390831-a11y --password-stdin
+```
+
+#### Phase 5: Docker イメージ Push
+
+```
+9️⃣ docker push ghcr.io/miya390831-a11y/aibo-studio-v8-ui:latest
+```
+
+#### Phase 6: RunPod Endpoint 更新
+
+```
+⑪ 既存の Endpoint がある場合 → イメージを最新版に更新
+⑫ Endpoint がない場合 → 新規作成情報を出力
+```
+
+#### Phase 7: ファイル同期・git 処理
+
+```
+⑬ git add → git commit → git push origin master
+⑭ 4拠点同期（robocopy）
+```
+
+#### Phase 8: 完了報告
+
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ RunPod UI デプロイ 完了
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+【実行内容】
+・Docker イメージビルド
+・ghcr.io に Push
+・Endpoint 更新情報を出力
+
+【Docker イメージ】
+Image: ghcr.io/miya390831-a11y/aibo-studio-v8-ui:latest
+Digest: sha256:xxxxxxxxxxxxx
+
+【git 処理】
+✅ git pull 実行
+✅ git push 完了
+✅ 4拠点同期 完了
+
+【次のステップ】
+→ RunPod Console で Endpoint 作成/確認
+→ URL: https://xxxxx-3000.proxy.runpod.io でアクセス
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+### 🎯 エラーハンドリング
+
+| エラー | 自動対応 |
+|---|---|
+| Docker Desktop 未起動 | 「Docker Desktop を起動してください」と通知 → 5秒待機 → 再確認ループ |
+| GitHub 未ログイン | 「gh auth login を実行してください」と通知 |
+| ビルド失敗 | ビルドログを表示 → 原因分析 → 修正指示 |
+| Push 失敗 (unauthorized) | GitHub トークン再取得 → 再ログイン → 再Push |
+
+### 🚀 短縮コマンド集
+
+```
+【毎日の UI 更新】
+「UI を RunPod で更新してください」
+
+【ビルドなし・Push だけ】
+「[Auto] Docker Push だけ実行（ビルドスキップ）」
+
+【ビルドのみ・Push なし】
+「[Auto] Docker ビルドのみ実行（ローカル検証用）」
+
+【4 拠点同期だけ】
+「[Auto] frontend を 4 拠点に同期してください」
+```
+
+---
+
 ## 🛑 禁止事項
 
 | 禁止項目 | 理由 |
@@ -161,147 +282,45 @@ Cline への指示：
 
 ## 📝 Cline 設定ファイルの配置
 
-このファイル（CLINE_RULES.md）を以下に配置：
-
 ```
 C:\Users\yuuki\aibo_v7\.cline_rules
 ```
 
-または、Cline の設定ウィンドウに直接貼り付け：
-
-```
-Settings → Custom Instructions / Rules
-↓
-このファイルの内容を貼り付け
-↓
-Save
-```
+または Cline の設定ウィンドウに直接貼り付け：
+Settings → Custom Instructions / Rules → 貼り付け → Save
 
 ---
 
 ## 🎯 使用例
 
-### **例 1: コード修正 + 4拠点同期**
+### 例 1: コード修正 + 4拠点同期
 
 ```
-Cline への指示：
+「aibo_telegram_bot.py の /generate コマンドにエラーハンドリングを追加。
+修正後、自動で 4拠点に同期。確認・報告は最後 1 回だけ。」
+→ Cline が自動で：修正 → git commit + push → 4拠点同期 → 報告「✅ 完了」
+```
 
-「aibo_telegram_bot.py の /generate コマンドに
-エラーハンドリングを追加してください。
+### 例 2: UI 起動 + RunPod 連携
 
-修正後、自動で 4拠点に同期してください。
-確認・報告は最後 1 回だけ。」
+```
+「Next.js UI を起動して、RunPod Endpoint で画像生成テスト。
+テストプロンプト：サイバーパンク・夜景、可愛い猫、桜の風景
+各テスト結果を summary.md に保存。承認・確認は不要。」
+→ Cline が自動で：UI 起動 → テスト実行 → summary.md 保存 → 報告「✅ テスト完了」
+```
 
+### 例 3: RunPod UI 更新（デプロイ自動化）
+
+```
+「UI を RunPod で更新してください」
 → Cline が自動で：
-  ✅ ファイル修正
-  ✅ git commit + push
-  ✅ 4拠点同期
-  ✅ 報告「✅ 完了」
-```
-
-### **例 2: UI 起動 + RunPod 連携**
-
-```
-Cline への指示：
-
-「Next.js UI を起動して、RunPod Endpoint で
-画像生成テストをしてください。
-
-テストプロンプト：
-- サイバーパンク・夜景
-- 可愛い猫
-- 桜の風景
-
-各テスト結果を summary.md に保存してください。
-承認・確認は不要。」
-
-→ Cline が自動で：
-  ✅ UI 起動（localhost:3000）
-  ✅ 3 件の画像生成テスト実行
-  ✅ 結果を summary.md に保存
-  ✅ 報告「✅ テスト完了」
-```
-
-### **例 3: 複数モデルコンペ + 自動同期**
-
-```
-Cline への指示：
-
-「以下を 3 モデル（Opus、Sonnet、GPT-4o）で
-並列実行してください。
-
-タスク：Dashboard コンポーネント作成
-
-各モデルの結果を comparison.md にまとめて、
-マスター（C:\Users\yuuki\aibo_v7\）に保存、
-その後 4拠点に同期。
-
-完了後、簡潔に報告。」
-
-→ Cline が自動で：
-  ✅ 3 モデルで並列実行
-  ✅ comparison.md 作成・保存
-  ✅ 4拠点同期
-  ✅ 報告「✅ 完了」
-```
-
----
-
-## 🔧 Cline 設定への統合方法
-
-### **Step 1: Cline Settings を開く**
-
-```
-VS Code → Cline アイコン（左サイドバー）
-→ ⚙️ Settings
-→ "Custom Instructions" または "Rules"
-```
-
-### **Step 2: ルールを貼り付け**
-
-このファイルの内容全体をコピーして、Cline の設定に貼り付け。
-
-### **Step 3: Save**
-
-```
-Save ボタン → 設定完了 ✅
-```
-
----
-
-## 🚀 次のステップ
-
-1. このファイルを Cline に設定
-2. 以下の指示でテスト：
-
-```
-「このルールに従って、以下を実行してください。
-
-タスク：
-1. C:\Users\yuuki\aibo_v7\README.md に
-   「Cline ルール設定完了」と追記
-
-2. git commit + push
-
-3. 4拠点に同期
-
-確認・報告は最後 1 回だけ。」
-```
-
-3. 完了を確認
-
----
-
-## 💡 ルールの更新
-
-ルールを変更したい場合：
-
-```
-このファイルを編集
-  ↓
-Cline Settings に新しい内容を貼り付け
-  ↓
-Save
+  ✅ Docker Desktop 確認
+  ✅ git pull
+  ✅ docker build
+  ✅ ghcr.io ログイン → Push
+  ✅ git push + 4拠点同期
+  ✅ 報告「✅ RunPod UI デプロイ完了」
 ```
 
 ---
