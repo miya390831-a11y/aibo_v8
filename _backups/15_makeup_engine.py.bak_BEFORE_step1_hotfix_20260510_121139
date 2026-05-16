@@ -1,0 +1,318 @@
+"""
+15_makeup_engine.py — v8.0 Layer 4 メイク (FLUX.1-Fill 流用)
+
+#3e-makeup-tuning-step1: 歪み軽減のため negative_prompt・steps=8・guidance=3.5 を使用。
+pipeline_manager.ensure_fill_pipeline / restore_after_fill を必ずペアで呼ぶ。
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from dataclasses import dataclass, field
+from typing import Any, Optional
+
+import torch
+from PIL import Image
+
+logger = logging.getLogger("AIBO_v7.MakeupEngine")
+
+# 全プリセット共通 · 顔以外の歪み抑制 (Step 1)
+_NEGATIVE_BASE = (
+    "facial deformation, distorted face, deformed features, "
+    "altered facial structure, changed jawline, modified nose shape, "
+    "different person, identity drift, "
+    "clothing change, hat change, accessory change, "
+    "background change, body shape change, posture change, "
+    "blurry, low quality, artifacts, "
+    "plastic skin, doll-like, airbrushed, overly smooth"
+)
+
+# frontend MakeupStyle とキー一致 (api-portrait.ts)
+# ★ positive は #3e-makeup-engine 由来のまま変更禁止 — Step 1 は negative のみ追加
+MAKEUP_PRESETS: dict[str, dict[str, str]] = {
+    "natural": {
+        "positive": (
+            "natural everyday makeup, bare skin look, subtle blush on cheeks, "
+            "soft natural lip color, minimal eye makeup, no heavy eyeshadow, "
+            "fresh dewy skin, soft focus, photorealistic, same person same identity"
+        ),
+        "negative": (
+            f"{_NEGATIVE_BASE}, "
+            "heavy makeup, bold lipstick, vivid eyeshadow, smoky eyes, "
+            "thick eyeliner, dramatic, theatrical"
+        ),
+    },
+    "pink": {
+        "positive": (
+            "pink feminine makeup, soft pink blush on cheeks, rose pink lipstick, "
+            "light pink eyeshadow, romantic look, subtle highlight, dewy finish, "
+            "photorealistic, same person same identity"
+        ),
+        "negative": (
+            f"{_NEGATIVE_BASE}, "
+            "dark makeup, smoky eyes, red lipstick, bold eyeliner, "
+            "matte finish, gothic, harsh"
+        ),
+    },
+    "glam": {
+        "positive": (
+            "glamorous makeup, bold red lipstick, smoky eye makeup, winged eyeliner, "
+            "defined cheekbones with contouring, long lashes, sultry look, "
+            "photorealistic, same person same identity"
+        ),
+        "negative": (
+            f"{_NEGATIVE_BASE}, "
+            "natural look, bare skin, no makeup, pale lips, "
+            "cute, childish, minimal"
+        ),
+    },
+    "kbeauty": {
+        "positive": (
+            "Korean beauty makeup, glass skin, dewy glowing complexion, "
+            "soft straight eyebrows, gradient lip with peachy pink color, "
+            "subtle aegyo-sal, fresh youthful look, photorealistic, same person same identity"
+        ),
+        "negative": (
+            f"{_NEGATIVE_BASE}, "
+            "matte heavy foundation, contoured cheekbones, dark lipstick, "
+            "smoky eyes, dramatic, mature look"
+        ),
+    },
+    "romantic": {
+        "positive": (
+            "romantic peach makeup, soft peachy blush, peach coral lipstick, "
+            "warm peach eyeshadow, fluffy natural eyebrows, soft glowy skin, "
+            "feminine dreamy look, photorealistic, same person same identity"
+        ),
+        "negative": (
+            f"{_NEGATIVE_BASE}, "
+            "cool tones, dark colors, harsh contrast, smoky, gothic, "
+            "matte finish, severe"
+        ),
+    },
+    "cool": {
+        "positive": (
+            "cool elegant makeup, sharp cat eye eyeliner, defined eyebrows, "
+            "matte nude or cool berry lipstick, subtle contouring, sophisticated look, "
+            "photorealistic, same person same identity"
+        ),
+        "negative": (
+            f"{_NEGATIVE_BASE}, "
+            "cute, sweet, pink tones, dewy glossy finish, soft fluffy, "
+            "childish, romantic"
+        ),
+    },
+    "mode": {
+        "positive": (
+            "high fashion mode makeup, dark smoky eye makeup, nude or beige lipstick, "
+            "sharp contouring, defined cheekbones, editorial fashion look, "
+            "photorealistic, same person same identity"
+        ),
+        "negative": (
+            f"{_NEGATIVE_BASE}, "
+            "natural, sweet, pink, cute, casual, daily look, "
+            "subtle, minimal"
+        ),
+    },
+    "night": {
+        "positive": (
+            "night party makeup, sparkling glitter eyeshadow, deep jewel tones, "
+            "bold dark lipstick, dramatic long lashes, luminous highlight, "
+            "glamorous evening look, photorealistic, same person same identity"
+        ),
+        "negative": (
+            f"{_NEGATIVE_BASE}, "
+            "natural daylight makeup, bare face, pale lips, "
+            "minimal, casual, no shimmer"
+        ),
+    },
+    "nomakeup": {
+        "positive": (
+            "no makeup look, bare skin appearance, natural skin texture with visible pores, "
+            "no lipstick, no eyeshadow, no eyeliner, clean fresh face, "
+            "skin correction only, photorealistic, same person same identity"
+        ),
+        "negative": (
+            f"{_NEGATIVE_BASE}, "
+            "any visible makeup, lipstick, eyeshadow, blush, "
+            "foundation, eyeliner, mascara"
+        ),
+    },
+    "retro": {
+        "positive": (
+            "old Hollywood retro makeup, vintage red lipstick, winged eyeliner, "
+            "defined arched eyebrows, matte porcelain skin, classic 1950s glamour, "
+            "photorealistic, same person same identity"
+        ),
+        "negative": (
+            f"{_NEGATIVE_BASE}, "
+            "modern dewy finish, gradient lips, K-beauty, "
+            "natural eyebrows, contemporary"
+        ),
+    },
+}
+
+# frontend: light | medium | heavy（仕様書 denoising）
+INTENSITY_LEVELS = {
+    "light": 0.15,
+    "medium": 0.225,
+    "heavy": 0.30,
+}
+
+NUM_INFERENCE_STEPS = 8
+GUIDANCE_SCALE = 3.5
+
+
+@dataclass
+class MakeupResult:
+    image: Optional[Image.Image]
+    success: bool
+    preset: str
+    intensity: str
+    denoising: float
+    elapsed: float
+    error: Optional[str] = None
+    warnings: list[str] = field(default_factory=list)
+
+
+def apply_makeup_with_pipeline_manager(
+    pipeline_manager: Any,
+    image: Image.Image,
+    face_mask: Image.Image,
+    makeup_style: str,
+    intensity: str,
+    seed: Optional[int] = None,
+) -> MakeupResult:
+    start = time.time()
+    if makeup_style not in MAKEUP_PRESETS:
+        return MakeupResult(
+            None,
+            False,
+            makeup_style,
+            intensity,
+            0.0,
+            0.0,
+            error=f"unknown_makeup_type: {makeup_style}",
+        )
+    if intensity not in INTENSITY_LEVELS:
+        return MakeupResult(
+            None,
+            False,
+            makeup_style,
+            intensity,
+            0.0,
+            0.0,
+            error=f"unknown_intensity: {intensity}",
+        )
+    if image is None or face_mask is None:
+        return MakeupResult(
+            None,
+            False,
+            makeup_style,
+            intensity,
+            0.0,
+            0.0,
+            error="image_or_mask_none",
+        )
+    if image.size != face_mask.size:
+        face_mask = face_mask.resize(image.size, Image.LANCZOS)
+
+    denoising = INTENSITY_LEVELS[intensity]
+    preset_data = MAKEUP_PRESETS[makeup_style]
+    positive = preset_data["positive"]
+    negative = preset_data["negative"]
+    device = getattr(pipeline_manager, "device", "cuda")
+    dev_str = str(device) if not isinstance(device, str) else device
+
+    logger.info(
+        "[MakeupEngine] 適用開始: preset=%s intensity=%s denoising=%.3f "
+        "steps=%s guidance=%s negative=enabled",
+        makeup_style,
+        intensity,
+        denoising,
+        NUM_INFERENCE_STEPS,
+        GUIDANCE_SCALE,
+    )
+
+    try:
+        pipe_fill = pipeline_manager.ensure_fill_pipeline()
+        if pipe_fill is None:
+            return MakeupResult(
+                None,
+                False,
+                makeup_style,
+                intensity,
+                denoising,
+                time.time() - start,
+                error="fill_pipeline_not_initialized",
+            )
+
+        if seed is not None:
+            gen = torch.Generator(device=dev_str).manual_seed(int(seed))
+        else:
+            gen = torch.Generator(device=dev_str).manual_seed(
+                int(torch.randint(0, 2**31 - 1, (1,)).item())
+            )
+
+        try:
+            with torch.inference_mode():
+                out = pipe_fill(
+                    prompt=positive,
+                    negative_prompt=negative,
+                    image=image,
+                    mask_image=face_mask,
+                    strength=denoising,
+                    guidance_scale=GUIDANCE_SCALE,
+                    num_inference_steps=NUM_INFERENCE_STEPS,
+                    generator=gen,
+                )
+            out_img = out.images[0] if hasattr(out, "images") else out[0]
+            elapsed = time.time() - start
+            logger.info("[MakeupEngine] 完了 %.2fs", elapsed)
+            return MakeupResult(
+                image=out_img,
+                success=True,
+                preset=makeup_style,
+                intensity=intensity,
+                denoising=denoising,
+                elapsed=elapsed,
+            )
+        finally:
+            pipeline_manager.restore_after_fill()
+
+    except torch.cuda.OutOfMemoryError as oom:
+        torch.cuda.empty_cache()
+        logger.error("[MakeupEngine] OOM: %s", oom)
+        try:
+            pipeline_manager.restore_after_fill()
+        except Exception:
+            pass
+        return MakeupResult(
+            None,
+            False,
+            makeup_style,
+            intensity,
+            denoising,
+            time.time() - start,
+            error=f"oom: {oom}",
+        )
+    except Exception as exc:
+        logger.exception("[MakeupEngine] 推論エラー: %s", exc)
+        try:
+            pipeline_manager.restore_after_fill()
+        except Exception:
+            pass
+        return MakeupResult(
+            None,
+            False,
+            makeup_style,
+            intensity,
+            denoising,
+            time.time() - start,
+            error=f"inference_error: {exc}",
+        )
+
+
+def list_makeup_presets() -> list[dict[str, str]]:
+    return [{"key": k} for k in MAKEUP_PRESETS]

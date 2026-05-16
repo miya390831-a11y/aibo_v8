@@ -1,0 +1,99 @@
+---
+description: AIBO Studio v8.0 標準起動・復旧フロー（朝の作業 / dev server / ngrok・Colab切れ切り分け）
+alwaysApply: true
+---
+
+# AIBO Studio v8.0 · 標準起動フロー（常駐知識 v1.0）
+
+## 構成（3 層）
+- **[1] ローカル PC**: Next.js dev server · **Cursor の責務はここだけ**
+- **[2] ngrok**: トンネル（PO）
+- **[3] Colab**: FastAPI:8000 + 推論（PO）— Cursor は操作しない。**手順の提示のみ**
+
+## 環境定数
+- マスター: `C:\Users\yuuki\aibo_v7\`
+- frontend: `C:\Users\yuuki\aibo_v7\frontend\`
+- 4 拠点同期: マスター・`Downloads\AIBOV7`・`Downloads\AIBOV7\3a`・`G:\マイドライブ\aibo_v7\`
+- ポート: dev **3000** · Colab API **8000**
+- フロントの API 先: **`NEXT_PUBLIC_API_URL`**（ngrok または `http://127.0.0.1:8000`）。※ `API_BASE` 表記は誤りに注意
+
+## S0 朝の標準起動（PO 推奨フロー）
+PO が朝最初に「起動して」「起動フローで」と言ったときの **全体像**（並行作業）:
+
+1. **Cursor**: dev server 起動 → **下記 S1** と同じ手順（掃除 → `npm run dev` → Ready 確認）
+2. **PO（並行）**: Colab で起動セル（＋必要ならワンセル起動 / ngrok）を回す
+3. **両方 Ready 後**: ブラウザで結合動作確認（`localhost:3000` · API 疎通 · 必要なら `.env.local` 更新後に dev 再起動）
+
+**補足**: dev server は Cursor 永続セッション側に紐づくため、PO 単独のターミナルより **安定しやすい** — 朝はこの S0 をデフォルトにする。
+
+## トリガー語 → 対応
+| PO の発言 | 対応 |
+|-----------|------|
+| 「起動して」「起動フローで」 | **S0**（Cursor は S1 · PO は Colab 並行） |
+| dev 落下・真っ白・`chrome-error://chromewebdata` | S2（S1 と同じ復旧） |
+| CSS 消えた・HMR 壊れ | S3 `.next` 削除 |
+| ngrok / Colab 切れ | S4 PO 向け手順のみ提示 |
+| EADDRINUSE | S5 PID 終了 |
+| Module not found | S6 `npm install` → 必要なら nuke |
+| SyntaxError / Compile | S7 報告して指示待ち（勝手に直さない） |
+| Ready が出ない | S8 Node 確認・nuke |
+| 変更後の確認 | S9 py_compile / tsc・同期 |
+
+## S1 朝・標準起動（Cursor）
+**S0 の手順 1**（dev のみ）。PO はこの間に Colab を並行起動できる。
+
+1. ポート確認: `netstat -ano | findstr :3000` — 表示あれば稼働中 → ブラウザ確認のみ可  
+2. 無ければ掃除してから起動:
+```powershell
+Get-Process -Name "node" -ErrorAction SilentlyContinue |
+  Where-Object { $_.Path -like "*aibo_v7*" } |
+  Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 2
+cd C:\Users\yuuki\aibo_v7\frontend
+npm run dev
+```
+3. PO へ: `http://localhost:3000` · Ctrl+Shift+R · `.env.local` の API URL 要確認
+
+## S3 HMR / 大型変更後
+```powershell
+# 同上で node 掃除後
+cd C:\Users\yuuki\aibo_v7\frontend
+Remove-Item -Recurse -Force .next -ErrorAction SilentlyContinue
+npm run dev
+```
+PO: ハードリロード · DevTools Network で Disable cache
+
+（`.next` 削除の詳細手順は `aibo-fastlane-execution` と整合）
+
+## S4 Colab/ngrok（提示のみ・Cursor は実行しない）
+1. Colab ランタイム再起動 → 起動セル（PuLID 構築は **Ctrl+C 厳禁**）  
+2. ワンセル起動（例: `17_one_cell_studio_v8.run_one_cell_v8`）  
+3. 新 ngrok URL を **`NEXT_PUBLIC_API_URL`** に反映（または Drive の `.env.local.latest.txt`）  
+4. **環境変数反映のため** ローカルで `npm run dev` 再起動（S1 Step 2–3）
+
+## S5 ポート競合
+`netstat -ano | findstr :3000` → LISTEN の PID を `Stop-Process -Id <PID> -Force`
+
+## S6 Module not found
+`cd frontend` → `npm install` → ダメなら（PO 承認後）`node_modules` と `package-lock.json` 削除して `npm install`
+
+## S7 コンパイルエラー
+エラーファイル・行番号を PO に共有。**勝手に修正しない**
+
+## S8 Ready が出ない
+Node 18+ 確認 → `.next` + `node_modules` nuke → `npm install` → `npm run dev`
+
+## S9 変更後チェック
+- Python: `python -m py_compile <file>`
+- TS: `npx tsc --noEmit`（重ければ省略可）
+- 変更ファイルのみ 4 拠点コピー + MD5 確認
+
+## 必須ルール（優先順）
+1. **dev 起動前は aibo_v7 配下 node を掃除**（ゾンビ・旧コード配信防止）  
+2. 4 拠点は**変更ファイルのみ**同期 · md5 確認  
+3. 大型統合後は `.next` 削除を提案  
+4. 変更後はコンパイルチェック  
+5. トラブル時は**ターミナル出力を先に確認**（推測で捌かない）  
+6. バックアップ: `_backups/<file>.bak_before_<理由>_<yyyyMMdd_HHmmss>`  
+7. Colab/ngrok は PO 領域  
+8. PuLID 構築セル実行中は **Ctrl+C 禁止** を PO に必ず伝える

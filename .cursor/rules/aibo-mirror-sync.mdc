@@ -1,0 +1,52 @@
+---
+description: After editing AIBO sources, mirror changed files to Google Drive and Downloads copies
+alwaysApply: true
+---
+
+# AIBO v7 — ミラー同期 (エージェント必須)
+
+## いつ
+
+`C:\Users\yuuki\aibo_v7\` 配下のファイルを**書き換えたら**、その変更をセッション内でミラーへ反映する。
+
+## どこへ（同一相対パス）
+
+変更したファイルごとに、次の 4 箇所で整合性を取る（`-Force` コピー + MD5 確認）。
+
+1. `C:\Users\yuuki\aibo_v7\`（作業元）
+2. `C:\Users\yuuki\Downloads\AIBOV7\`
+3. `C:\Users\yuuki\Downloads\AIBOV7\3a\`
+4. `G:\マイドライブ\aibo_v7\`（必須）
+
+`.cursor/rules/` を編集した場合も例外なく同一相対パスで 4 箇所に同期する。
+（`C:\Users\yuuki\aibo_v7\.cursor\rules\` / `C:\Users\yuuki\Downloads\AIBOV7\.cursor\rules\` /
+`C:\Users\yuuki\Downloads\AIBOV7\3a\.cursor\rules\` / `G:\マイドライブ\aibo_v7\.cursor\rules\`）
+
+## 除外
+
+- `__pycache__\` · `.pyc` はコピーしない。
+
+## AIBO v7 コア3ファイルの内部ミラー同期（Drive 内）
+
+`G:\マイドライブ\aibo_v7\` で次の 3 ファイルを編集したら、同一ファイル名を必ず内部ミラーへ同期する。
+
+- `01_config.py`
+- `03_identity_engine.py`
+- `05_orchestrator.py`
+
+同期先:
+
+1. `G:\マイドライブ\aibo_v7\.gradio\`
+2. `G:\マイドライブ\aibo_v7\models\`
+3. `G:\マイドライブ\aibo_v7\_backups\`
+
+同期後は作業元と同期先の MD5 が一致することを確認して報告する。
+
+## PowerShell 例（単一ファイル）
+
+```powershell
+Copy-Item "C:\Users\yuuki\aibo_v7\03_identity_engine.py" `
+  -Destination "G:\マイドライブ\aibo_v7\03_identity_engine.py" -Force
+```
+
+複数ファイルを編集した場合は、**編集したすべてのパス**について上記 4 箇所を更新し、Drive 側も必ず反映する。

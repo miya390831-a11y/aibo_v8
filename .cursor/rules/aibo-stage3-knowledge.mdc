@@ -1,0 +1,43 @@
+﻿---
+description: AIBO Stage 3 implementation references and guardrails
+alwaysApply: true
+---
+
+# Cursor Knowledge (AIBO プロジェクト用)
+
+## 重要ドキュメント
+
+### 設計仕様書
+- `docs/01_設計仕様書_AIBO_v7_A100_FULL_POWER.md` (元設計書)
+- `docs/Patch_C_Stage_3_Implementation_Design.md` (Stage 3 設計書 · 2026-05-04 作成)
+
+### ベストプラクティス
+- `docs/03_A100_Diffusers_ベストプラクティス.md`
+
+### Stage 3 関連
+Stage 3 の実装は必ず Patch_C_Stage_3_Implementation_Design.md に従うこと。
+特に以下の原則:
+1. AIBO 純正 NunchakuPuLIDBinder を破壊しない
+2. transformer.forward 直接置換ではなく forward ラップを使う
+3. Stage 3a → 3b → 3c の順序を守る
+4. 各 Stage で必ず _backups/ にバックアップ作成
+### 同期ルール (ミラー · 必須)
+- 作業基準: `C:\Users\yuuki\aibo_v7` で編集したら、**変更したファイルを次のミラーへ同一相対パスでコピー**する（セッション内・編集直後）。
+- **ミラー先 (優先順は問わない · すべて更新):**
+  1. `G:\マイドライブ\aibo_v7\` — Google Drive for Desktop（Colab / 他マシン取り込み用）
+  2. `C:\Users\yuuki\Downloads\AIBOV7\`
+  3. 必要に応じて `C:\Users\yuuki\Downloads\AIBOV7\3a\`
+- 詳細手順・例は `.cursor/rules/aibo-mirror-sync.mdc` を参照。
+- `_backups/` はバックアップ用途でプロジェクトに含める。`__pycache__/` は同期対象外。
+### ナレッジ参照ルール (Markdown)
+- `aibo_v7` 配下の `*.md` はナレッジとして参照対象に含める。
+- 実装前に、関連する `*.md`（設計書・手順書・ベストプラクティス）を先に確認してから変更する。
+- `docs/` が存在しない場合でも、プロジェクト内の `*.md` を探索して同等の仕様書を優先参照する。
+### 追加参考文献フォーク運用
+- 追加参考文献を fork / clone したときは、くろうど用に参照 URL を必ず明記する。
+- URL は raw URL を優先し、優先度（最優先 / 高優先 / 中優先）を添えて整理する。
+
+### 実行ポリシー (速度優先)
+- コード編集時および参考文献 fork 時は、許可認証が不要な公開ソースを優先し、最速で完了させる。
+- 認証や対話入力が必要な経路は原則回避し、公開で取得可能な代替 URL / 代替リポへ即時切替する。
+

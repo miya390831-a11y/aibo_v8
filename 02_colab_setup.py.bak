@@ -1,0 +1,662 @@
+"""
+================================================================================
+🌌 AIBO CYBER STUDIO v7.2 · Section 2 · Colab Setup & GDrive Sync
+================================================================================
+
+📌 このファイルの責務:
+    1. NunchakuInstaller: GitHub Releases Wheel から正規 Nunchaku を install
+       (PyPI の偽 nunchaku を排除)
+    2. DependencyInstaller: Diffusers / Transformers / 周辺ライブラリ一括 install
+    3. PuLIDOfficialFetcher: ToTheBeginning/PuLID 公式リポジトリを git clone
+    4. GDriveCheckpointer: 5 分間隔で outputs/ を Drive に rsync 同期
+    5. ColabBootstrap: 起動時の一括セットアップ (Drive マウント → DL → 依存 → 確認)
+
+依存:
+    - 01_config.py (RuntimeStrategy, SystemConfig)
+    - subprocess, threading, importlib.util (標準ライブラリ)
+
+使い方 (Colab セル):
+    from importlib import import_module
+    cfg_mod = import_module("01_config")
+    setup_mod = import_module("02_colab_setup")
+
+    sys_cfg = cfg_mod.SystemConfig()
+    bootstrap = setup_mod.ColabBootstrap(sys_cfg)
+    bootstrap.run()  # 全自動セットアップ
+
+Author: 🥷 CTO くろうど
+Date:   2026-05-03
+Version: v7.2
+================================================================================
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import shutil
+import subprocess
+import sys
+import threading
+import time
+from importlib import import_module
+from pathlib import Path
+from typing import Optional
+
+# 01_config から型 / 設定を import (importlib 経由 = 数字始まりファイル名対応)
+_cfg_mod = import_module("01_config")
+SystemConfig    = _cfg_mod.SystemConfig
+RuntimeStrategy = _cfg_mod.RuntimeStrategy
+StrategyKind    = _cfg_mod.StrategyKind
+logger          = _cfg_mod.logger
+
+
+# ============================================================================
+# 📦 Section 2.1 · Nunchaku 偽物排除 + 公式 Wheel Install
+# ============================================================================
+
+class NunchakuInstaller:
+    """
+    PyPI の偽 nunchaku を物理削除し、GitHub Releases から正規 Wheel を install。
+
+    Wheel 命名規則 (v6 で実証済):
+        v1.2.1: nunchaku-1.2.1+cu{CUDA}torch{TORCH}-{PY}-{PY}-linux_x86_64.whl
+                例: nunchaku-1.2.1+cu12.8torch2.10-cp312-cp312-linux_x86_64.whl
+
+        v1.1.0: nunchaku-1.1.0+torch{TORCH}-{PY}-{PY}-linux_x86_64.whl
+                (CUDA タグなし · 旧命名規則)
+
+    検証:
+        NunchakuFluxTransformer2dModel が import できることを確認。
+    """
+
+    NUNCHAKU_ORG = "nunchaku-ai"  # GitHub org (nunchaku-tech はリダイレクトで 404 リスク)
+    VERSIONS_TO_TRY = ["1.2.1", "1.1.0"]
+
+    def __init__(self):
+        self._py_tag: Optional[str]      = None
+        self._torch_mm: Optional[str]    = None  # "2.10"
+        self._cuda_dotted: Optional[str] = None  # "12.8"
+
+    # ─── 環境検出 ───
+
+    def _detect_env(self) -> dict:
+        py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+
+        try:
+            import torch
+            torch_full = torch.__version__              # "2.10.0+cu128"
+            torch_base = torch_full.split("+")[0]       # "2.10.0"
+            torch_mm = ".".join(torch_base.split(".")[:2])  # "2.10"
+
+            cuda_dotted = None
+            m = re.search(r"\+cu(\d+)", torch_full)
+            if m:
+                raw = m.group(1)
+                cuda_dotted = f"{raw[:2]}.{raw[2:]}" if len(raw) >= 3 else raw
+        except Exception:
+            torch_mm = "2.10"
+            cuda_dotted = "12.8"
+
+        self._py_tag = py_tag
+        self._torch_mm = torch_mm
+        self._cuda_dotted = cuda_dotted
+
+        return {"py_tag": py_tag, "torch_mm": torch_mm, "cuda_dotted": cuda_dotted}
+
+    # ─── Wheel URL 候補生成 ───
+
+    def _build_wheel_candidates(self) -> list[str]:
+        py = self._py_tag
+        tm = self._torch_mm
+        cu = self._cuda_dotted or "12.8"
+
+        candidates: list[str] = []
+
+        # v1.2.1: 検出 CUDA + 検出 torch
+        v12_base = f"https://github.com/{self.NUNCHAKU_ORG}/nunchaku/releases/download/v1.2.1"
+        candidates.append(
+            f"{v12_base}/nunchaku-1.2.1+cu{cu}torch{tm}-{py}-{py}-linux_x86_64.whl"
+        )
+
+        # v1.2.1: cu12.8 fallback (検出 CUDA が他バージョンの場合)
+        if cu != "12.8":
+            candidates.append(
+                f"{v12_base}/nunchaku-1.2.1+cu12.8torch{tm}-{py}-{py}-linux_x86_64.whl"
+            )
+
+        # v1.2.1: torch2.11 fallback (torch2.10 環境でも 2.11 wheel が動く場合)
+        if tm == "2.10":
+            candidates.append(
+                f"{v12_base}/nunchaku-1.2.1+cu12.8torch2.11-{py}-{py}-linux_x86_64.whl"
+            )
+
+        # v1.1.0: 旧命名規則 (CUDA タグなし)
+        v11_base = f"https://github.com/{self.NUNCHAKU_ORG}/nunchaku/releases/download/v1.1.0"
+        candidates.append(
+            f"{v11_base}/nunchaku-1.1.0+torch{tm}-{py}-{py}-linux_x86_64.whl"
+        )
+
+        # 重複排除 (順序維持)
+        return list(dict.fromkeys(candidates))
+
+    # ─── 既存 nunchaku の物理削除 ───
+
+    def _purge_existing(self):
+        logger.info("🧹 [Nunchaku] 既存パッケージを削除 (PyPI 偽物 / 旧 ABI 対策)")
+        for _ in range(2):  # 2 回叩く (依存関係で残ることがあるため)
+            subprocess.run(
+                [sys.executable, "-m", "pip", "uninstall", "-y", "nunchaku"],
+                capture_output=True, text=True,
+            )
+
+    # ─── 検証 ───
+
+    def _verify_install(self) -> tuple[bool, str]:
+        """NunchakuFluxTransformer2dModel が import できるか確認"""
+        result = subprocess.run(
+            [sys.executable, "-c",
+             "import nunchaku; "
+             "from nunchaku import NunchakuFluxTransformer2dModel; "
+             "v = getattr(nunchaku, '__version__', 'unknown'); "
+             "print('OK', v, nunchaku.__file__)"],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            return True, result.stdout.strip()
+        return False, (result.stderr or "")[-500:]
+
+    # ─── 前提ツール ───
+
+    def _ensure_build_tools(self):
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-q",
+             "--upgrade", "numpy>=2", "ninja", "wheel", "setuptools", "packaging"],
+            capture_output=True, text=True,
+        )
+
+    # ─── メイン処理 ───
+
+    def install(self, *, force: bool = False) -> bool:
+        """Nunchaku を install · 既に正規版が入っていれば skip"""
+
+        # 既存検証
+        if not force:
+            ok, info = self._verify_install()
+            if ok:
+                logger.info(f"✅ [Nunchaku] 既に正規版 install 済: {info}")
+                return True
+
+        # 環境検出
+        env = self._detect_env()
+        logger.info(f"🔎 [Nunchaku] 環境: Python {env['py_tag']} / Torch {env['torch_mm']} / CUDA {env['cuda_dotted']}")
+
+        # 偽物排除
+        self._purge_existing()
+
+        # build tools
+        self._ensure_build_tools()
+
+        # Wheel 候補を試す
+        candidates = self._build_wheel_candidates()
+        logger.info(f"🎯 [Nunchaku] Wheel 候補 {len(candidates)} 個を試行")
+
+        last_err = "(no attempts)"
+        for url in candidates:
+            wheel_name = url.split("/")[-1]
+            logger.info(f"   📥 試行: {wheel_name}")
+
+            r = subprocess.run(
+                [sys.executable, "-m", "pip", "install", url],
+                capture_output=True, text=True,
+            )
+
+            if r.returncode != 0:
+                err_tail = (r.stderr or "")[-300:]
+                if "404" in err_tail or "Could not find" in err_tail:
+                    logger.info(f"   ℹ️ 404 (この Wheel は未提供)")
+                else:
+                    logger.warning(f"   ⚠️ pip install 失敗: {err_tail.strip()}")
+                last_err = err_tail
+                continue
+
+            # 検証
+            ok, info = self._verify_install()
+            if ok:
+                logger.info(f"   ✅ Install + 検証 OK: {info}")
+                return True
+
+            logger.warning(f"   ⚠️ Install 成功するも import 失敗: {info[-200:]}")
+            self._purge_existing()
+            last_err = info
+
+        logger.error(f"❌ [Nunchaku] 全 Wheel 候補失敗")
+        logger.error(f"   最終エラー: {last_err}")
+        logger.error(f"   💡 手動で確認: https://github.com/nunchaku-tech/nunchaku/releases")
+        return False
+
+
+# ============================================================================
+# 📦 Section 2.2 · Diffusers + 周辺ライブラリ Install
+# ============================================================================
+
+class DependencyInstaller:
+    """
+    AIBO v7.2 が必要とする全ライブラリを install。
+    Colab 環境では多くが pre-installed なので、不足分のみ補う設計。
+    """
+
+    # ─── 必須パッケージ (バージョン下限) ───
+    CORE_PACKAGES = [
+        ("diffusers",        ">=0.32"),
+        ("transformers",     ">=4.46"),
+        ("accelerate",       ">=1.0"),
+        ("peft",             ">=0.13"),
+        ("safetensors",      ">=0.4"),
+        ("sentencepiece",    None),
+        ("gradio",           ">=5.0"),
+        ("huggingface_hub",  ">=0.26"),
+        ("controlnet-aux",   None),       # ControlNet 前処理
+        ("opencv-python-headless", None), # 顔検出用
+        ("pillow",           None),
+        ("einops",           None),       # PuLID 内部で使用
+    ]
+
+    # ─── PuLID 関連 ───
+    PULID_PACKAGES = [
+        ("insightface",      None),
+        ("facexlib",         None),
+        ("timm",             None),
+        ("onnxruntime-gpu",  None),
+    ]
+
+    # ─── アップスケール関連 (オプション) ───
+    UPSCALE_PACKAGES = [
+        ("realesrgan",       None),
+        ("basicsr",          None),
+    ]
+
+    @classmethod
+    def install_all(cls, *, include_upscale: bool = True) -> dict[str, bool]:
+        results = {}
+        all_pkgs = list(cls.CORE_PACKAGES) + list(cls.PULID_PACKAGES)
+        if include_upscale:
+            all_pkgs += list(cls.UPSCALE_PACKAGES)
+
+        logger.info(f"📦 [Deps] {len(all_pkgs)} パッケージを install 開始")
+
+        for name, version_spec in all_pkgs:
+            spec = f"{name}{version_spec}" if version_spec else name
+            r = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-q", spec],
+                capture_output=True, text=True,
+            )
+            success = r.returncode == 0
+            results[name] = success
+            mark = "✅" if success else "⚠️"
+            logger.info(f"   {mark} {spec}")
+            if not success:
+                logger.warning(f"      → {(r.stderr or '')[-150:].strip()}")
+
+        ok_count = sum(1 for v in results.values() if v)
+        logger.info(f"📦 [Deps] 完了: {ok_count}/{len(results)} success")
+        return results
+
+
+# ============================================================================
+# 🔯 Section 2.3 · PuLID 公式リポジトリ Clone
+# ============================================================================
+
+class PuLIDOfficialFetcher:
+    """
+    ToTheBeginning/PuLID 公式リポジトリを git clone し、
+    sys.path に追加することで MockDiT 略奪パターンを可能にする。
+
+    v6 知見:
+        - 公式リポを丸ごと使うことで InsightFace + EVA-CLIP + BiSeNet の
+          依存パイプライン全体を自動セットアップできる
+        - DummyTransformer を渡せば「顔抽出機能だけ」を略奪可能
+    """
+
+    GIT_URL = "https://github.com/ToTheBeginning/PuLID.git"
+
+    def __init__(self, install_dir: str = "/content/PuLID"):
+        self.install_dir = Path(install_dir)
+
+    def fetch(self) -> bool:
+        """git clone + sys.path 追加"""
+
+        if self.install_dir.exists() and (self.install_dir / "pulid").exists():
+            logger.info(f"✅ [PuLID Fetcher] 既に clone 済: {self.install_dir}")
+            self._add_to_syspath()
+            return True
+
+        logger.info(f"📦 [PuLID Fetcher] git clone 開始: {self.GIT_URL}")
+        try:
+            self.install_dir.parent.mkdir(parents=True, exist_ok=True)
+            result = subprocess.run(
+                ["git", "clone", "--depth", "1", self.GIT_URL, str(self.install_dir)],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                logger.error(f"❌ [PuLID Fetcher] clone 失敗: {result.stderr[-300:]}")
+                return False
+        except Exception as e:
+            logger.error(f"❌ [PuLID Fetcher] 例外: {e}")
+            return False
+
+        self._add_to_syspath()
+
+        # import テスト
+        try:
+            from pulid.pipeline_flux import PuLIDPipeline  # noqa: F401
+            logger.info("✅ [PuLID Fetcher] pulid.pipeline_flux import OK")
+            return True
+        except ImportError as e:
+            logger.error(f"⚠️ [PuLID Fetcher] import 失敗 (依存ライブラリ未 install?): {e}")
+            return False
+
+    def _add_to_syspath(self):
+        path_str = str(self.install_dir)
+        if path_str not in sys.path:
+            sys.path.insert(0, path_str)
+            logger.info(f"   ✅ sys.path に追加: {path_str}")
+
+
+# ============================================================================
+# 💾 Section 2.4 · GDrive Checkpointer (5 分間隔同期)
+# ============================================================================
+
+class GDriveCheckpointer:
+    """
+    Colab セッション kill 対策。
+    /content/aibo_v7_outputs/ を 5 分間隔で /content/drive/MyDrive/aibo_v7/outputs/ に rsync。
+
+    バックグラウンドスレッドで動作し、停止には .stop() を呼ぶ。
+    """
+
+    def __init__(
+        self,
+        local_dir: Path,
+        drive_dir: Path,
+        interval_sec: int = 300,
+    ):
+        self.local_dir = Path(local_dir)
+        self.drive_dir = Path(drive_dir)
+        self.interval_sec = interval_sec
+
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._sync_count = 0
+        self._last_sync_at: Optional[float] = None
+        self._last_sync_ok: bool = False
+
+    # ─── 単発同期 ───
+
+    def sync_once(self) -> bool:
+        """1 回の差分同期を実行"""
+
+        if not self.local_dir.exists():
+            self.local_dir.mkdir(parents=True, exist_ok=True)
+
+        if not self.drive_dir.exists():
+            try:
+                self.drive_dir.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                logger.warning(f"⚠️ [GDriveCheckpointer] drive_dir 作成失敗: {e}")
+                return False
+
+        # rsync が利用できればそれを使う、なければ shutil で代替
+        if shutil.which("rsync"):
+            cmd = [
+                "rsync", "-a", "--delete-after",
+                f"{self.local_dir}/",
+                f"{self.drive_dir}/",
+            ]
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            ok = r.returncode == 0
+            if not ok:
+                logger.warning(f"⚠️ [GDriveCheckpointer] rsync 失敗: {(r.stderr or '')[-200:]}")
+        else:
+            # shutil フォールバック (Drive のディレクトリ全体をコピー)
+            try:
+                if self.drive_dir.exists():
+                    shutil.rmtree(self.drive_dir)
+                shutil.copytree(self.local_dir, self.drive_dir)
+                ok = True
+            except Exception as e:
+                logger.warning(f"⚠️ [GDriveCheckpointer] shutil コピー失敗: {e}")
+                ok = False
+
+        self._sync_count += 1
+        self._last_sync_at = time.time()
+        self._last_sync_ok = ok
+        if ok:
+            logger.info(f"💾 [GDriveCheckpointer] sync #{self._sync_count} 完了")
+        return ok
+
+    # ─── バックグラウンド ループ ───
+
+    def _loop(self):
+        logger.info(f"🔄 [GDriveCheckpointer] バックグラウンド起動 (間隔 {self.interval_sec}s)")
+        while not self._stop_event.is_set():
+            try:
+                self.sync_once()
+            except Exception as e:
+                logger.error(f"❌ [GDriveCheckpointer] 同期中に例外: {e}")
+            # interval_sec の間 sleep だが、stop 要求があれば早期離脱
+            self._stop_event.wait(timeout=self.interval_sec)
+        logger.info("🛑 [GDriveCheckpointer] バックグラウンド停止")
+
+    def start(self):
+        if self._thread is not None and self._thread.is_alive():
+            logger.info("⏭ [GDriveCheckpointer] 既に起動済 · skip")
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        if self._thread is None:
+            return
+        self._stop_event.set()
+        self._thread.join(timeout=5)
+        self._thread = None
+
+    # ─── 状態 ───
+
+    def status(self) -> dict:
+        return {
+            "running": self._thread is not None and self._thread.is_alive(),
+            "sync_count": self._sync_count,
+            "last_sync_at": self._last_sync_at,
+            "last_sync_ok": self._last_sync_ok,
+            "interval_sec": self.interval_sec,
+        }
+
+
+# ============================================================================
+# 🚀 Section 2.5 · Colab Bootstrap (一括セットアップ)
+# ============================================================================
+
+class ColabBootstrap:
+    """
+    Colab 起動時の全自動セットアップ。
+
+    実行ステップ:
+        1. Drive マウント (Colab 環境のみ)
+        2. SystemConfig.ensure_dirs() で必要ディレクトリ作成
+        3. RuntimeStrategy.detect() で環境検出
+        4. DependencyInstaller で Diffusers + 周辺 install
+        5. NunchakuInstaller (Nunchaku 戦略の場合のみ)
+        6. PuLIDOfficialFetcher で公式リポ clone
+        7. GDriveCheckpointer 起動
+    """
+
+    def __init__(self, sys_cfg: SystemConfig):
+        self.sys_cfg = sys_cfg
+        self.checkpointer: Optional[GDriveCheckpointer] = None
+
+    # ─── 1. Drive マウント ───
+
+    def _mount_drive(self) -> bool:
+        """Colab 環境なら Drive をマウント"""
+        try:
+            from google.colab import drive  # type: ignore
+        except ImportError:
+            logger.info("ℹ️ [Bootstrap] 非 Colab 環境 · Drive マウント skip")
+            return False
+
+        if Path("/content/drive/MyDrive").exists():
+            logger.info("✅ [Bootstrap] Drive 既にマウント済")
+            return True
+
+        logger.info("🔗 [Bootstrap] Drive マウント中...")
+        try:
+            drive.mount("/content/drive")
+            logger.info("✅ [Bootstrap] Drive マウント完了")
+            return True
+        except Exception as e:
+            logger.error(f"❌ [Bootstrap] Drive マウント失敗: {e}")
+            return False
+
+    # ─── メイン処理 ───
+
+    def run(
+        self,
+        *,
+        skip_deps: bool = False,
+        skip_nunchaku: bool = False,
+        skip_pulid_clone: bool = False,
+        skip_checkpointer: bool = False,
+    ) -> dict:
+        """
+        全自動セットアップを実行。
+
+        Args:
+            skip_*: 各ステップをスキップする (再起動時のショートカット用)
+
+        Returns:
+            各ステップの結果辞書
+        """
+        logger.info("=" * 60)
+        logger.info("🚀 AIBO v7.2 ColabBootstrap 起動")
+        logger.info("=" * 60)
+
+        results: dict = {}
+
+        # 1. Drive マウント
+        results["drive_mounted"] = self._mount_drive()
+
+        # 2. ディレクトリ準備
+        self.sys_cfg.ensure_dirs()
+        results["dirs_ready"] = True
+
+        # 3. 戦略検出
+        strategy = self.sys_cfg.resolve_strategy()
+        results["strategy"] = strategy.kind.value
+
+        # 4. 依存ライブラリ
+        if not skip_deps:
+            dep_results = DependencyInstaller.install_all(include_upscale=self.sys_cfg.enable_upscaler)
+            results["deps_installed"] = sum(1 for v in dep_results.values() if v)
+            results["deps_total"] = len(dep_results)
+        else:
+            results["deps_installed"] = "(skipped)"
+
+        # 5. Nunchaku (戦略が要求する場合のみ)
+        if not skip_nunchaku and strategy.kind == StrategyKind.A100_40GB_NUNCHAKU:
+            ok = NunchakuInstaller().install()
+            results["nunchaku_installed"] = ok
+            if not ok:
+                # フォールバック: GGUF 戦略に降格
+                logger.warning("⚠️ [Bootstrap] Nunchaku install 失敗 → GGUF フォールバックに降格")
+                self.sys_cfg.strategy = None  # 再検出を強制
+                self.sys_cfg.resolve_strategy()
+                results["strategy_fallback"] = self.sys_cfg.strategy.kind.value
+        else:
+            results["nunchaku_installed"] = "(not needed)" if not skip_nunchaku else "(skipped)"
+
+        # 6. PuLID 公式リポ
+        if not skip_pulid_clone and self.sys_cfg.enable_pulid:
+            pulid_ok = PuLIDOfficialFetcher().fetch()
+            results["pulid_official_fetched"] = pulid_ok
+        else:
+            results["pulid_official_fetched"] = "(skipped)"
+
+        # 7. GDrive Checkpointer
+        if not skip_checkpointer and self.sys_cfg.enable_gdrive_sync:
+            self.checkpointer = GDriveCheckpointer(
+                local_dir=self.sys_cfg.output_dir,
+                drive_dir=self.sys_cfg.drive_root / "outputs",
+                interval_sec=self.sys_cfg.gdrive_sync_interval_sec,
+            )
+            self.checkpointer.start()
+            results["checkpointer_started"] = True
+        else:
+            results["checkpointer_started"] = "(skipped)"
+
+        logger.info("=" * 60)
+        logger.info("🎉 ColabBootstrap 完了")
+        logger.info("=" * 60)
+        for k, v in results.items():
+            logger.info(f"  {k}: {v}")
+        logger.info("=" * 60)
+
+        return results
+
+    def shutdown(self):
+        """終了時のクリーンアップ"""
+        if self.checkpointer is not None:
+            # 最後の同期を必ず実行
+            self.checkpointer.sync_once()
+            self.checkpointer.stop()
+
+
+# ============================================================================
+# 🔧 Section 2.6 · スタンドアロン動作確認
+# ============================================================================
+
+if __name__ == "__main__":
+    print("=" * 60)
+    print("🌌 AIBO v7.2 · Section 2 (Colab Setup) 動作確認")
+    print("=" * 60)
+
+    # SystemConfig を起動
+    sys_cfg = SystemConfig()
+    sys_cfg.resolve_strategy()
+
+    print()
+    print(f"🔍 検出戦略: {sys_cfg.strategy.kind.value}")
+    print()
+
+    # 各クラスのスタンドアロンテスト (副作用なしのもののみ)
+    print("🧪 NunchakuInstaller env 検出:")
+    inst = NunchakuInstaller()
+    env = inst._detect_env()
+    print(f"  Python: {env['py_tag']}")
+    print(f"  Torch:  {env['torch_mm']}")
+    print(f"  CUDA:   {env['cuda_dotted']}")
+
+    print()
+    print("🧪 NunchakuInstaller Wheel 候補生成:")
+    candidates = inst._build_wheel_candidates()
+    for i, url in enumerate(candidates, 1):
+        print(f"  {i}. {url.split('/')[-1]}")
+
+    print()
+    print("🧪 GDriveCheckpointer status (停止状態):")
+    ckpt = GDriveCheckpointer(
+        local_dir=Path("/tmp/aibo_test_local"),
+        drive_dir=Path("/tmp/aibo_test_drive"),
+        interval_sec=60,
+    )
+    print(f"  status: {ckpt.status()}")
+
+    print()
+    print("⚠️ 完全な run() 確認は Colab 上でのみ可能です:")
+    print("  bootstrap = ColabBootstrap(sys_cfg)")
+    print("  bootstrap.run()")
+
+    print()
+    print("✅ Section 2 動作確認完了")

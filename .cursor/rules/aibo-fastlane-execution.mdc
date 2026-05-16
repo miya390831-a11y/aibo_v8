@@ -1,0 +1,42 @@
+---
+description: Fast-lane execution policy for rapid autonomous implementation
+alwaysApply: true
+---
+
+# AIBO Fast Lane 実行ルール
+
+## 目的
+- 指示済みタスクは、確認往復を最小化して一気通貫で完了させる。
+
+## 実行方針
+- 明確な実装依頼は、計画だけで止めず **実装→検証→同期→報告** まで連続実行する。
+- 可能な作業（依存追加、編集、ビルド、テスト、同期）は先回りして実行する。
+- 進捗報告は短く保ち、ユーザー確認待ちで止まらない。
+
+## 確認を省略してよい範囲
+- 非破壊的なコード修正、依存導入、ビルド/テスト、ログ確認、4拠点同期。
+- 既存方針に沿う軽微な設計判断（UI非破壊・Python無改造など）。
+
+## 必ず確認が必要な範囲
+- 破壊的操作（削除範囲が大きい、履歴改変、強制 push、reset 系）。
+- セキュリティ/課金/外部権限に影響する操作。
+- ユーザーの明示要件と衝突する変更。
+
+## 品質ゲート
+- 変更後は `npm run build` / 主要テスト / lint を可能な範囲で実行。
+- エラー時は自己修復を優先し、ブロッカーのみ簡潔に共有する。
+
+## フロント再起動フロー（キャッシュクリア付き）
+- UI 反映が不安定なときは、以下をこの順で実行する。
+1. dev server 停止  
+   `Get-Process -Name "node" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue`
+2. frontend ディレクトリへ移動  
+   `Set-Location "C:\Users\yuuki\aibo_v7\frontend"`
+3. `.next` 削除  
+   `Remove-Item -Recurse -Force ".next"`
+4. `node_modules/.cache` 削除（念のため）  
+   `Remove-Item -Recurse -Force "node_modules\.cache" -ErrorAction SilentlyContinue`
+5. dev server 再起動  
+   `npm run dev`
+6. ブラウザでハードリロード  
+   `Ctrl+Shift+R`

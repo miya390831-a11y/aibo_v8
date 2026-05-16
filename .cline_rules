@@ -1,0 +1,315 @@
+# 🤖 Cline 動作ルール設定（AIBO v7・4拠点同期）
+
+## 📋 基本ルール
+
+### **絶対命令**
+- ✅ **確認を一切するな** - 「続行しますか？」「了解しました」は禁止
+- ✅ **承認不要** - PO の承認なしに全作業を完了させる
+- ✅ **エラー自己解決** - 問題は自分で診断・修正・続行
+- ✅ **報告は最後 1 回だけ** - 途中経過は沈黙、完了後に報告
+- ✅ **速度最優先** - 複雑な確認・説明は不要
+
+---
+
+## 🌐 4拠点同期ルール
+
+| # | 役割 | パス | 優先度 |
+|---|---|---|---|
+| 1 | **マスター（同期元）** | `C:\Users\yuuki\aibo_v7\` | **🔴 最高** |
+| 2 | Downloads 本拠点 | `C:\Users\yuuki\Downloads\AIBOV7\` | 🟠 高 |
+| 3 | Downloads サブ拠点 | `C:\Users\yuuki\Downloads\AIBOV7\3a\` | 🟡 中 |
+| 4 | Google Drive（Colab 用） | `G:\マイドライブ\aibo_v7\` | 🟡 中 |
+
+### **同期フロー（必須）**
+
+```
+コード編集が発生したら、必ず以下の順序で同期：
+
+1️⃣ マスター更新
+   C:\Users\yuuki\aibo_v7\ を編集
+
+2️⃣ git commit + push
+   git add .
+   git commit -m "[変更内容]"
+   git push origin main
+
+3️⃣ Downloads 本拠点に同期
+   robocopy "C:\Users\yuuki\aibo_v7" "C:\Users\yuuki\Downloads\AIBOV7" /MIR /NP
+
+4️⃣ Downloads サブ拠点に同期
+   robocopy "C:\Users\yuuki\aibo_v7" "C:\Users\yuuki\Downloads\AIBOV7\3a" /MIR /NP
+
+5️⃣ Google Drive に同期
+   robocopy "C:\Users\yuuki\aibo_v7" "G:\マイドライブ\aibo_v7" /MIR /NP
+
+6️⃣ 完了報告
+   「✅ 4拠点同期完了」
+```
+
+### **同期コマンド（短縮版）**
+
+```powershell
+# Cline にこれを指示すれば自動実行
+$master = "C:\Users\yuuki\aibo_v7"
+$dl1 = "C:\Users\yuuki\Downloads\AIBOV7"
+$dl2 = "C:\Users\yuuki\Downloads\AIBOV7\3a"
+$gd = "G:\マイドライブ\aibo_v7"
+
+# git push
+cd $master
+git add .
+git commit -m "auto-sync"
+git push origin main
+
+# robocopy 同期
+robocopy $master $dl1 /MIR /NP
+robocopy $master $dl2 /MIR /NP
+robocopy $master $gd /MIR /NP
+
+Write-Host "✅ 4拠点同期完了"
+```
+
+---
+
+## 🚀 RunPod UI 自動セットアップ・起動ルール
+
+### **自動セットアップ対象**
+
+- ✅ **Next.js** - `npm install` + `npm run dev` 自動実行
+- ✅ **NGLOCK** - モジュール自動インストール
+- ✅ **Flask / FastAPI** - 依存関係自動インストール
+- ✅ **Docker** - イメージビルド・起動自動実行
+
+### **UI 起動フロー**
+
+```
+Cline への指示：「UI を起動してください」
+  ↓
+Cline が自動で：
+  1️⃣ プロジェクトを検出
+  2️⃣ 必要な依存関係をインストール（npm install など）
+  3️⃣ サーバーを起動（npm run dev, python app.py など）
+  4️⃣ localhost:PORT でアクセス可能にする
+  5️⃣ アクセス URL を報告
+  ↓
+完了 ✅
+```
+
+### **Next.js UI 起動コマンド（例）**
+
+```
+Cline への指示：
+
+「C:\Users\yuuki\aibo_v7 の Next.js UI を起動してください。
+
+以下を自動実行：
+1. npm install（必要なら）
+2. npm run dev
+3. localhost:3000 で起動
+4. アクセス URL を報告
+5. 他の確認・質問は一切不要」
+
+→ Cline が自動で完了 ✅
+```
+
+### **RunPod Endpoint 経由で画像生成（例）**
+
+```
+Cline への指示：
+
+「RunPod Endpoint を使って、以下を自動実行：
+
+1. UI で入力されたプロンプトを取得
+2. RunPod に API 呼び出し
+3. 画像生成
+4. UI に表示
+5. 承認・確認は不要
+
+完了後、簡潔に報告」
+
+→ Cline が自動で完了 ✅
+```
+
+---
+
+## 🛑 禁止事項
+
+| 禁止項目 | 理由 |
+|---|---|
+| ❌ 「実行しますか？」と聞く | 無駄。指示した = 実行して |
+| ❌ 「続行してもいいですか？」 | 同上 |
+| ❌ 長い説明・手順表示 | 時間の無駄。黙って実行 |
+| ❌ 確認・レビュー待ち | 自動で進める |
+| ❌ エラーで止まる | 自分で原因を特定・修正・続行 |
+| ❌ API キー / トークンを画面に表示 | セキュリティ危険 |
+| ❌ 複数オプション提示 | PO が選ぶ時間無駄。自動判断 |
+
+---
+
+## ✅ 推奨される動作
+
+| 推奨項目 | 実装方法 |
+|---|---|
+| ✅ 自動判断 | 状況に応じて最良の選択肢を自動実行 |
+| ✅ 自動エラーハンドリング | エラーが出たら自動修正・リトライ |
+| ✅ 自動最適化 | コード生成時に自動でパフォーマンス最適化 |
+| ✅ 自動テスト実行 | 修正後、自動でテスト・検証 |
+| ✅ 自動同期 | コード変更後、4拠点に自動同期 |
+| ✅ 最小限の報告 | 「✅ 完了」だけで十分 |
+
+---
+
+## 📝 Cline 設定ファイルの配置
+
+このファイル（CLINE_RULES.md）を以下に配置：
+
+```
+C:\Users\yuuki\aibo_v7\.cline_rules
+```
+
+または、Cline の設定ウィンドウに直接貼り付け：
+
+```
+Settings → Custom Instructions / Rules
+↓
+このファイルの内容を貼り付け
+↓
+Save
+```
+
+---
+
+## 🎯 使用例
+
+### **例 1: コード修正 + 4拠点同期**
+
+```
+Cline への指示：
+
+「aibo_telegram_bot.py の /generate コマンドに
+エラーハンドリングを追加してください。
+
+修正後、自動で 4拠点に同期してください。
+確認・報告は最後 1 回だけ。」
+
+→ Cline が自動で：
+  ✅ ファイル修正
+  ✅ git commit + push
+  ✅ 4拠点同期
+  ✅ 報告「✅ 完了」
+```
+
+### **例 2: UI 起動 + RunPod 連携**
+
+```
+Cline への指示：
+
+「Next.js UI を起動して、RunPod Endpoint で
+画像生成テストをしてください。
+
+テストプロンプト：
+- サイバーパンク・夜景
+- 可愛い猫
+- 桜の風景
+
+各テスト結果を summary.md に保存してください。
+承認・確認は不要。」
+
+→ Cline が自動で：
+  ✅ UI 起動（localhost:3000）
+  ✅ 3 件の画像生成テスト実行
+  ✅ 結果を summary.md に保存
+  ✅ 報告「✅ テスト完了」
+```
+
+### **例 3: 複数モデルコンペ + 自動同期**
+
+```
+Cline への指示：
+
+「以下を 3 モデル（Opus、Sonnet、GPT-4o）で
+並列実行してください。
+
+タスク：Dashboard コンポーネント作成
+
+各モデルの結果を comparison.md にまとめて、
+マスター（C:\Users\yuuki\aibo_v7\）に保存、
+その後 4拠点に同期。
+
+完了後、簡潔に報告。」
+
+→ Cline が自動で：
+  ✅ 3 モデルで並列実行
+  ✅ comparison.md 作成・保存
+  ✅ 4拠点同期
+  ✅ 報告「✅ 完了」
+```
+
+---
+
+## 🔧 Cline 設定への統合方法
+
+### **Step 1: Cline Settings を開く**
+
+```
+VS Code → Cline アイコン（左サイドバー）
+→ ⚙️ Settings
+→ "Custom Instructions" または "Rules"
+```
+
+### **Step 2: ルールを貼り付け**
+
+このファイルの内容全体をコピーして、Cline の設定に貼り付け。
+
+### **Step 3: Save**
+
+```
+Save ボタン → 設定完了 ✅
+```
+
+---
+
+## 🚀 次のステップ
+
+1. このファイルを Cline に設定
+2. 以下の指示でテスト：
+
+```
+「このルールに従って、以下を実行してください。
+
+タスク：
+1. C:\Users\yuuki\aibo_v7\README.md に
+   「Cline ルール設定完了」と追記
+
+2. git commit + push
+
+3. 4拠点に同期
+
+確認・報告は最後 1 回だけ。」
+```
+
+3. 完了を確認
+
+---
+
+## 💡 ルールの更新
+
+ルールを変更したい場合：
+
+```
+このファイルを編集
+  ↓
+Cline Settings に新しい内容を貼り付け
+  ↓
+Save
+```
+
+---
+
+🤖 **Cline は PO（ミヤチン）の専属アシスタント。**
+⚡ **確認ゼロ・速度最優先・品質は自動実装。**
+🎯 **AIBO v7 プロジェクトを全力でサポート。**
+
+---
+
+**このルール設定ファイルを Cline に統合すれば、完全自動化フロー完成！** 🚀

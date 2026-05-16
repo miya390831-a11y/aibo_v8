@@ -1,0 +1,5 @@
+# Cursor #3a — FastAPI バックエンド用 (Colab 起動セルに追記可)
+# Gradio 6.x と整合するよう下限を満たす (fastapi>=0.115.2, multipart>=0.0.18)
+fastapi>=0.115.2,<1.0
+uvicorn[standard]>=0.32.0
+python-multipart>=0.0.18,<1.0

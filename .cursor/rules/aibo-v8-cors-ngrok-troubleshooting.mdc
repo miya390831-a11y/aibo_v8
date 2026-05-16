@@ -1,0 +1,32 @@
+---
+description: CORS / ngrok 再発時の切り分け（fetch が警告 HTML を食う · FastAPI CORS · Phase 制）
+alwaysApply: false
+---
+
+# AIBO v8 · CORS / ngrok トラブルシュート（#3c-cors-resurrection）
+
+## 典型症状
+- ブラウザ: `No 'Access-Control-Allow-Origin' header`（`localhost:3000` → `*.ngrok-free.dev`）
+- **真因になりがち**: ngrok 無料の**警告ページ HTML**が返り、そこに CORS ヘッダが無い（FastAPI 未到達）
+
+## 切り分け順（Phase 1）
+1. **コード**: `09_fastapi_server.py` に `CORSMiddleware` + `force_cors_headers` があるか
+2. **コード**: `frontend/lib/api.ts` の `apiFetch` が **`ngrok-skip-browser-warning`** を付けるか  
+   - 推奨: `NEXT_PUBLIC_NGROK_SKIP_WARNING=true` **または** `NEXT_PUBLIC_API_URL` の host に `ngrok` を含むときは**常に**付与（env 忘れ対策）
+3. **PO（ブラウザ）**: `https://<ngrok>/docs` が Swagger か / 警告ページか / 502 か
+
+## Case 対応
+| Case | 状況 | 対応 |
+|------|------|------|
+| α | `/docs` が 502・tunnel offline | Colab / ngrok 再起動（Cursor 外） |
+| β | FastAPI 生きているが CORS 設定欠落 | `09_fastapi_server.py` 修復 |
+| γ | 警告ページ・ヘッダ未送信 | `api.ts`（全 API は `apiFetch` 経由で統一） |
+| δ | 不明 | CTO 判断 |
+
+## 禁止事項
+- `allow_origins=["*"]` と `allow_credentials=True` の併用（不可）
+- 原因不明で `16_pose_extractor.py` を触らない（CORS と無関係）
+
+## 修正後
+- Case γ: `npx tsc --noEmit` · **dev 再起動**（`.env` / `api.ts` 変更時）
+- 変更ファイルのみ 4 拠点同期
