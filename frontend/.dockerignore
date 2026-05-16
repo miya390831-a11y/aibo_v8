@@ -1,0 +1,10 @@
+node_modules
+.next
+.git
+.gitignore
+*.md
+.env.local
+.vscode
+Dockerfile
+docker-entrypoint.sh
+.dockerignore
