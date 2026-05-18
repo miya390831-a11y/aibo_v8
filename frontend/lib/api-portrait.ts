@@ -4,9 +4,6 @@
 
 import { apiFetch } from "./api"
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
-const NGROK_SKIP = process.env.NEXT_PUBLIC_NGROK_SKIP_WARNING === "true"
-
 export interface BodyShapeAxis {
   x: number
   y: number

@@ -25,6 +25,8 @@ const nextConfig = {
       bodySizeLimit: "20mb",
     },
   },
+
+  // /api/* は app/api/[[...path]]/route.ts が FastAPI にプロキシ（ngrok 単一トンネル向け）
 };
 
 export default nextConfig;
