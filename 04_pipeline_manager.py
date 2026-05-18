@@ -115,6 +115,42 @@ def _vram_used_gb() -> float:
     return torch.cuda.memory_allocated() / (1024 ** 3)
 
 
+# city96/FLUX.1-dev-gguf — flux1-dev-Q5_K_M.gguf 等はリポジトリに存在しない
+_GGUF_CITY96_REPO = "city96/FLUX.1-dev-gguf"
+_GGUF_CITY96_FALLBACK_ORDER = (
+    "flux1-dev-Q5_K_S.gguf",
+    "flux1-dev-Q5_0.gguf",
+    "flux1-dev-Q5_1.gguf",
+    "flux1-dev-Q4_K_S.gguf",
+    "flux1-dev-Q8_0.gguf",
+    "flux1-dev-Q4_0.gguf",
+    "flux1-dev-Q6_K.gguf",
+    "flux1-dev-Q4_1.gguf",
+    "flux1-dev-Q3_K_S.gguf",
+    "flux1-dev-Q2_K.gguf",
+    "flux1-dev-F16.gguf",
+)
+
+
+def _resolve_city96_gguf_filename(preferred: str, repo_files: set[str]) -> tuple[str, bool]:
+    """
+    list_repo_files の結果から実在する GGUF を選択。
+    Returns: (filename, matched_preferred)
+    """
+    candidates: list[str] = [preferred]
+    for name in _GGUF_CITY96_FALLBACK_ORDER:
+        if name not in candidates:
+            candidates.append(name)
+    for fn in candidates:
+        if fn in repo_files:
+            return fn, fn == preferred
+    ggufs = sorted(f for f in repo_files if str(f).endswith(".gguf"))
+    raise FileNotFoundError(
+        f"{_GGUF_CITY96_REPO}: 希望・フォールバックとも欠落 "
+        f"(tried {candidates[:8]}...). Repo .gguf: {ggufs}"
+    )
+
+
 # ============================================================================
 # 🏛️ Section 4.1 · FluxA100PipelineManager
 # ============================================================================
@@ -160,6 +196,10 @@ class FluxA100PipelineManager:
         # Phase 3b: メインパイプ CPU 退避 ↔ GPU 復帰 (Fill INT4 lazy load 時)
         self._main_pipelines_offloaded = False
 
+        # Phase C デバッグ: build() が False のとき最後の例外を外部から参照する
+        self.last_build_error_message: str | None = None
+        self.last_build_traceback: str | None = None
+
     # ─────────────────────────────────────────────────
     # 4.1.A · 公開 API: build()
     # ─────────────────────────────────────────────────
@@ -175,6 +215,10 @@ class FluxA100PipelineManager:
         logger.info("=" * 60)
 
         try:
+            # Nunchaku / 大規模ロード前にキャッシュを空けてピーク VRAM を抑える
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
             if self.strategy.is_nunchaku():
                 self._build_nunchaku()
             elif self.strategy.is_bf16_pure():
@@ -200,12 +244,17 @@ class FluxA100PipelineManager:
             logger.info("=" * 60)
             logger.info(f"🎉 PipelineManager 構築完了 (VRAM 使用: {_vram_used_gb():.1f} GB)")
             logger.info("=" * 60)
+            self.last_build_error_message = None
+            self.last_build_traceback = None
             return True
 
         except Exception as e:
-            logger.error(f"❌ [PipelineManager] 構築失敗: {e}")
+            self.last_build_error_message = f"{type(e).__name__}: {e}"
             import traceback
-            logger.error(traceback.format_exc())
+            tb = traceback.format_exc()
+            self.last_build_traceback = tb
+            logger.error(f"❌ [PipelineManager] 構築失敗: {e}")
+            logger.error(tb)
             return False
 
     # ─────────────────────────────────────────────────
@@ -215,6 +264,10 @@ class FluxA100PipelineManager:
     def _build_nunchaku(self):
         """A100 40GB · Nunchaku INT4 経路 (本命)"""
         logger.info("⚡ [Nunchaku 経路] 構築開始")
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
 
         from nunchaku import NunchakuFluxTransformer2dModel
         from diffusers import FluxPipeline
@@ -855,12 +908,33 @@ class FluxA100PipelineManager:
         logger.info("📦 [GGUF 経路] 構築開始")
 
         from diffusers import FluxPipeline, FluxTransformer2DModel
-        from huggingface_hub import hf_hub_download
+        from huggingface_hub import HfApi, hf_hub_download
 
-        gguf_path = hf_hub_download(
-            repo_id="city96/FLUX.1-dev-gguf",  # 一般的な GGUF 配布元
-            filename=self.sys_cfg.gguf_filename,
-        )
+        repo_id = _GGUF_CITY96_REPO
+        api = HfApi()
+        try:
+            remote = set(api.list_repo_files(repo_id, repo_type="model"))
+        except Exception as e:
+            logger.error(f"❌ HF list_repo_files 失敗 ({repo_id}): {e}")
+            raise
+
+        try:
+            gguf_name, used_preferred = _resolve_city96_gguf_filename(
+                self.sys_cfg.gguf_filename,
+                remote,
+            )
+        except FileNotFoundError as e:
+            logger.error(f"❌ {e}")
+            raise
+
+        if not used_preferred:
+            logger.warning(
+                f"  ⚠️ gguf_filename 不在 «{self.sys_cfg.gguf_filename}» → «{gguf_name}» を使用"
+            )
+        else:
+            logger.info(f"  ✅ GGUF 実在確認: {gguf_name}")
+
+        gguf_path = hf_hub_download(repo_id=repo_id, filename=gguf_name)
 
         try:
             from diffusers import GGUFQuantizationConfig
