@@ -1,0 +1,27 @@
+# Orchestrator / PuLID / FLUX
+# Dockerfile で torch 2.3 + cu121 に上げたうえでインストール（torch.xpu / FluxPipeline 用）。
+# 多数の拡張は NumPy 2 未対応のため 1.x に固定。
+numpy>=1.24.0,<2.0.0
+scipy>=1.11.0,<1.14.0
+scikit-learn>=1.3.0,<1.5.0
+# FluxIPAdapterMixin 等は diffusers 0.32+（0.31 では loaders に未収録）。
+diffusers>=0.32.0,<0.34.0
+transformers>=4.45.0,<5.0.0
+accelerate>=0.30.0,<1.0.0
+peft>=0.12.0,<0.15.0
+safetensors>=0.4.0
+sentencepiece
+protobuf>=4.25.0
+huggingface_hub>=0.24.0,<1.0.0
+controlnet-aux>=0.0.7
+opencv-python-headless>=4.8.0
+pillow>=10.0.0
+einops>=0.7.0
+gradio>=5.0.0
+insightface
+facexlib
+timm
+onnxruntime-gpu
+ftfy
+ultralytics
+boto3>=1.34.0

@@ -1,0 +1,66 @@
+[H[2J[3J
+   █████╗ ██╗██████╗  ██████╗
+  ██╔══██╗██║██╔══██╗██╔═══██╗      🥷 AIBO Cyber Studio v8.0
+  ███████║██║██████╔╝██║   ██║         Remote Command Bridge
+  ██╔══██║██║██╔══██╗██║   ██║              Bootstrap v4.0
+  ██║  ██║██║██████╔╝╚██████╔╝
+  ╚═╝  ╚═╝╚═╝╚═════╝  ╚═════╝       by CTO Kuroudo (Opus 4.7)
+
+  📱 スマホ司令室体制 全自動構築
+  ⏱  PO 実作業: 5 分 / 全完成: 60-90 分
+
+
+[0;36m[1m━━━ Step 0/8: 環境検出 ━━━[0m
+
+[0;34m[INFO][0m OS: linux
+[0;32m[ OK ][0m 必須ツール OK
+
+[0;36m[1m━━━ Step 1/8: GitHub CLI 検出 ━━━[0m
+
+[0;32m[ OK ][0m gh CLI: gh version 2.46.0 (2025-12-13 Ubuntu 2.46.0-4)
+[0;32m[ OK ][0m GitHub 認証: miya390831-a11y
+
+[0;36m[1m━━━ Step 2/8: AIBO リポジトリ確認 ━━━[0m
+
+[0;32m[ OK ][0m リポジトリ存在: miya390831-a11y/aibo_v8
+
+[0;36m[1m━━━ Step 3/8: Telegram Token 入力 ━━━[0m
+
+
+📱 \033[1mスマホでこの 2 つを取得してください\033[0m:
+
+  \033[0;36m1. Telegram Bot Token\033[0m
+     ・スマホ Telegram で @BotFather に話しかける
+     ・/newbot → Bot 名 "AIBO Studio Bridge" → ユーザー名 (例: aibo_bridge_bot)
+     ・表示される Token (例: 1234567890:ABC-DEF...) をコピー
+
+  \033[0;36m2. あなたの Telegram User ID\033[0m
+     ・スマホ Telegram で @userinfobot に話しかける
+     ・表示される ID (数字) をコピー
+
+
+[0;34m[INFO][0m Telegram Bot API を検証中...
+[0;32m[ OK ][0m Telegram Bot: @aibo_bridge_miyachin_bot 動作確認 OK
+[0;34m[INFO][0m テストメッセージを Telegram に送信中...
+[0;32m[ OK ][0m Telegram メッセージ送信 OK
+[0;34m[INFO][0m スマホで Telegram を確認してください → 通知が届いていれば成功
+
+[0;36m[1m━━━ Step 4/8: API キー入力 (Cline + OpenRouter) ━━━[0m
+
+
+🔑 \033[1mCline で N モデルコンペを実現するための API キー\033[0m:
+
+  \033[0;36mOpenRouter API キー\033[0m (推奨 · 1 つで Claude/GPT/Gemini/DeepSeek 全部)
+  \033[0;36mOpenAI API キー\033[0m     (既存・任意)
+
+  ★ Claude Code は Max プラン経由で認証されるため API キー不要 ★
+  ★ 全部空 Enter で 後から /set_key コマンドで追加可能 ★
+
+
+
+[0;34m[INFO][0m OpenRouter API キー検証中...
+[0;32m[ OK ][0m OpenRouter API 動作 OK (363 モデル利用可)
+
+[0;36m[1m━━━ Step 5/8: GitHub Codespace 作成 ━━━[0m
+
+[0;34m[INFO][0m Codespace を新規作成中 (1-2 分かかります)...

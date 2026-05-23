@@ -1,0 +1,7 @@
+{
+  "pod_id": "1fnpzz8cliihlz",
+  "idle_minutes": 10,
+  "min_uptime_before_stop_seconds": 600,
+  "vram_change_epsilon_pct": 0.5,
+  "status_url": "https://YOUR_POD_HOST-3000.proxy.runpod.io/api/system/status"
+}
