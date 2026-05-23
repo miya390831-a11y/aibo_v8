@@ -563,17 +563,10 @@ class ColabBootstrap:
             - 破損 -> force reinstall + os.kill で自己再起動
                      再起動後、ColabBootstrap が再実行されると
                      今度は健全になっているので通過する。
-
-        RunPod / Docker では os.kill がコンテナ全体を落とすためスキップする。
         """
         import logging
-        import os
 
         logger = logging.getLogger("AIBO_v7")
-
-        if os.environ.get("AIBO_RUNTIME") == "runpod":
-            logger.info("[ColabBootstrap] RunPod · scipy 自己再起動プローブをスキップ")
-            return
 
         scipy_broken = False
         try:
