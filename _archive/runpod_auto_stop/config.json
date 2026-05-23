@@ -1,0 +1,7 @@
+{
+  "pod_id": "xed64txqg15j30",
+  "idle_minutes": 10,
+  "min_uptime_before_stop_seconds": 600,
+  "vram_change_epsilon_pct": 0.5,
+  "status_url": "https://xed64txqg15j30-64410d75-8000.proxy.runpod.io/api/system/status"
+}

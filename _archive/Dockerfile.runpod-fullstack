@@ -1,0 +1,77 @@
+# AIBO Studio v8.0 — RunPod Pod fullstack (Next.js :3000 + FastAPI :8000)
+# build: docker build -f Dockerfile.runpod-fullstack -t ghcr.io/miya390831-a11y/aibo-studio-v8-full:latest .
+
+# ── Stage 1: Next.js standalone ──
+FROM node:20-alpine AS frontend-builder
+WORKDIR /frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --include=dev
+COPY frontend/ ./
+ENV NEXT_TELEMETRY_DISABLED=1
+# 同一 Pod: 相対 /api → rewrites → localhost:8000
+ENV NEXT_PUBLIC_API_URL=
+ENV NEXT_PUBLIC_USE_RELATIVE_API=true
+RUN npm run build
+
+# ── Stage 2: GPU runtime + API + UI ──
+FROM runpod/pytorch:2.1.1-py3.10-cuda12.1.1-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV CUDA_VISIBLE_DEVICES=0
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates gnupg git ffmpeg libsm6 libxext6 \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /content /workspace/aibo
+
+WORKDIR /workspace/aibo
+
+COPY requirements-runpod-api.txt .
+RUN pip install --no-cache-dir -r requirements-runpod-api.txt
+
+# diffusers 0.30+ が torch.xpu を参照するため、ベースイメージの torch 2.1 から 2.3 + cu121 に揃える。
+RUN pip install --no-cache-dir \
+    "torch==2.3.0" "torchvision==0.18.0" "torchaudio==2.3.0" \
+    --index-url https://download.pytorch.org/whl/cu121
+
+COPY requirements-runpod-orch.txt .
+RUN pip install --no-cache-dir -r requirements-runpod-orch.txt \
+    && (pip uninstall -y opencv-contrib-python 2>/dev/null || true)
+
+# 推論 + FastAPI（起動時バックグラウンドで orchestrator を attach）
+COPY 01_config.py 02_colab_setup.py 03_identity_engine.py 04_pipeline_manager.py ./
+COPY 05_orchestrator.py 06_ui.py 07_main.py 08_face_refiner.py ./
+COPY 09_fastapi_server.py 16_pose_extractor.py 18_runpod_fastapi_bootstrap.py 19_runpod_combined_entry.py ./
+COPY 10_mask_engine.py 15_makeup_engine.py 17_neutralize_engine.py ./
+COPY pipeline_manager.py ./
+
+COPY scripts/runpod-start.sh /usr/local/bin/runpod-start.sh
+# Windows で CRLF になった場合の /bin/bash^M 対策
+RUN sed -i 's/\r$//' /usr/local/bin/runpod-start.sh && chmod +x /usr/local/bin/runpod-start.sh
+
+# Next.js standalone
+WORKDIR /app
+COPY --from=frontend-builder /frontend/public ./public
+COPY --from=frontend-builder /frontend/.next/standalone ./
+COPY --from=frontend-builder /frontend/.next/static ./.next/static
+
+ENV BACKEND_DIR=/workspace/aibo
+ENV FRONTEND_DIR=/app
+ENV NODE_ENV=production
+ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
+ENV AIBO_RUNTIME=runpod
+ENV AIBO_DATA_ROOT=/workspace/aibo
+ENV AIBO_AUTO_ORCHESTRATOR=1
+ENV HF_HOME=/workspace/aibo/hf
+ENV TRANSFORMERS_CACHE=/workspace/aibo/hf/transformers
+ENV DIFFUSERS_CACHE=/workspace/aibo/hf/diffusers
+ENV HUGGINGFACE_HUB_CACHE=/workspace/aibo/hf/hub
+
+EXPOSE 3000 8000
+
+CMD ["/usr/local/bin/runpod-start.sh"]
