@@ -318,13 +318,27 @@ class DependencyInstaller:
         ok_count = sum(1 for v in results.values() if v)
         logger.info(f"📦 [Deps] 完了: {ok_count}/{len(results)} success")
 
-        # numpy 強制再 install 後はランタイム再起動を促す
+        # numpy 強制再 install 後はランタイム自動再起動 (Cell 1 修復セル不要化)
+        # /tmp マーカーで再起動ループを防止 (Colab セッション中は永続)
         if results.get("numpy", False):
-            logger.warning(
-                "⚠️ [Deps] numpy が再 install されました。"
-                "C 拡張モジュールを反映するためランタイム再起動を推奨:\n"
-                "   Colab メニュー → ランタイム → セッションを再起動"
-            )
+            import os as _os, sys as _sys, time as _time
+            _marker = "/tmp/.aibo_numpy_reinstalled"
+            if _os.path.exists(_marker):
+                logger.info("✅ [Deps] numpy 再 install 済みマーカー検出、再起動スキップ")
+            else:
+                with open(_marker, "w") as _f:
+                    _f.write("done")
+                logger.warning(
+                    "⚠️ [Deps] numpy が再 install されました。"
+                    "C 拡張 ABI 不整合回避のため自動再起動します。"
+                )
+                print("\n" + "=" * 60)
+                print("🔄 ランタイム自動再起動中...")
+                print("   → 'Reconnect' 後に起動セルを再実行してください")
+                print("=" * 60)
+                _sys.stdout.flush()
+                _time.sleep(2)
+                _os.kill(_os.getpid(), 9)
 
         return results
 
@@ -551,6 +565,7 @@ class ColabBootstrap:
                      今度は健全になっているので通過する。
         """
         import logging
+
         logger = logging.getLogger("AIBO_v7")
 
         scipy_broken = False
