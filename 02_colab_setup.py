@@ -282,8 +282,9 @@ class DependencyInstaller:
         ("basicsr",          None),
     ]
 
-    # numpy/scipy/sklearn は他依存より先に強制再 install すべきパッケージ
-    FORCE_REINSTALL_FIRST = ["numpy", "scipy", "scikit-learn"]
+    # numpy はバージョン不足時のみ install (Colab デフォルトが既に 2.1+ なら触らない)
+    # これによって ABI 不整合 → 自動再起動の発火を回避し、1 押下完走を実現
+    FORCE_REINSTALL_FIRST = ["scipy", "scikit-learn"]
 
     @classmethod
     def install_all(cls, *, include_upscale: bool = True) -> dict[str, bool]:
