@@ -327,6 +327,7 @@ class AiboMain:
         share: bool = True,
         server_port: int = 7860,
         inbrowser: bool = False,
+        enable_gradio: bool = True,
     ) -> bool:
         """
         全 Phase を順番に実行。
@@ -356,12 +357,19 @@ class AiboMain:
         self.logger.info(f"🎉 起動準備完了 (合計 {total:.1f}s)")
         self.logger.info("=" * 60)
 
-        # ここで UI 起動 (ブロッキング)
-        return self.phase_g_launch_ui(
-            share=share,
-            server_port=server_port,
-            inbrowser=inbrowser,
-        )
+        # Phase G: Gradio launch (A方式運用ではスキップ可能)
+        if enable_gradio:
+            return self.phase_g_launch_ui(
+                share=share,
+                server_port=server_port,
+                inbrowser=inbrowser,
+            )
+        else:
+            try:
+                self.logger.info("⏭️ Phase G (Gradio) スキップ · A方式運用")
+            except Exception:
+                print("⏭️ Phase G (Gradio) スキップ · A方式運用")
+            return True
 
     # ────────────────────────────────────────
     # サマリーログ
