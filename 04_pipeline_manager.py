@@ -984,46 +984,14 @@ class FluxA100PipelineManager:
                 filename=self.sys_cfg.hyper_flux_filename,
             )
             self._shared_transformer.update_lora_params(hyper_path)
-            try:
-                self._shared_transformer.set_lora_strength(self.sys_cfg.hyper_flux_weight)
-            except Exception:
-                pass
+
+            # Hyper-FLUX の strength を確実に適用 (ACE++ 撤去後の最終値)
+            # Nunchaku の set_lora_strength はグローバル multiplier として全 LoRA に効くため、
+            # Hyper のみ load の状態でこの値が effective strength となる
+            hyper_strength = float(self.sys_cfg.hyper_flux_weight) if hasattr(self.sys_cfg, 'hyper_flux_weight') and self.sys_cfg.hyper_flux_weight else 1.0
+            self._shared_transformer.set_lora_strength(hyper_strength)
             self._hyper_flux_loaded = True
-            logger.info(f"  ✅ Hyper-FLUX 注入完了 (weight={self.sys_cfg.hyper_flux_weight}, 8-step 蒸留)")
-
-            # ─── ACE++ Portrait LoRA (v7.4.0 Phase 1 NEW · 2026-05-13) ──
-            # リサーチ先生レポート 3-A: SVDQuant 低ランクブランチに直接 Fuse
-            # 速度劣化 0% · joint_attention_kwargs 経路と完全独立動作
-            ace_plus_path = "/content/drive/MyDrive/aibo_v7/_models/ace_plus/ace_plus_portrait_lora.safetensors"
-            if os.path.exists(ace_plus_path):
-                try:
-                    # Nunchaku の連続 update_lora_params によるマルチ LoRA スタック
-                    self._shared_transformer.update_lora_params(ace_plus_path)
-                    self._shared_transformer.set_lora_strength(0.6)  # 黄金値 (リサーチ先生 3-A)
-                    logger.info(f"✅ [Phase 1] ACE++ Portrait LoRA ロード完了 (weight=0.6)")
-                except Exception as e:
-                    logger.warning(f"⚠️ [Phase 1] ACE++ LoRA ロード失敗: {e}")
-                    logger.warning(f"   Nunchaku v0.2.0+ が必要 (マルチ LoRA サポート)")
-            else:
-                logger.warning(f"⚠️ [Phase 1] ACE++ LoRA ファイルなし: {ace_plus_path}")
-                logger.warning(f"   ACE++ なしで動作 (顔似度 80% のまま)")
-
-            # ─── ACE++ Subject LoRA (v7.4.0 Phase 2 v2 NEW · 2026-05-06) ──
-            # 戦略 B' 改訂版 (USO Pivot)
-            # rank 16 軽量版 · 服/物体保持
-            # set_lora_strength は起動時 0.0 (Stage 2 で動的に 0.6 へ)
-            ace_plus_subject_path = "/content/drive/MyDrive/aibo_v7/_models/ace_plus/ace_plus_subject_lora.safetensors"
-            if os.path.exists(ace_plus_subject_path):
-                try:
-                    self._shared_transformer.update_lora_params(ace_plus_subject_path)
-                    # 起動時 scale=0 (Stage 1 想定)
-                    # Stage 2 で動的に id_cfg.ace_plus_subject_weight に切替
-                    self._shared_transformer.set_lora_strength(0.0)
-                    logger.info("✅ [Phase 2 v2] ACE++ Subject LoRA ロード完了 (146 MB · scale=0.0 起動時)")
-                except Exception as e:
-                    logger.warning(f"⚠️ [Phase 2 v2] ACE++ Subject LoRA ロード失敗: {e}")
-            else:
-                logger.warning(f"⚠️ [Phase 2 v2] ACE++ Subject LoRA ファイルなし: {ace_plus_subject_path}")
+            logger.info(f"✅ Hyper-FLUX loaded · strength={hyper_strength}")
         except Exception as e:
             logger.warning(f"  ⚠️ Hyper-FLUX 注入失敗: {e}")
             logger.warning("     → LoRA なしで続行 · 28 steps 相当に降格")
@@ -1039,69 +1007,18 @@ class FluxA100PipelineManager:
         subject_weight: float = 0.6,
     ) -> None:
         """
-        StudioMode に応じて ACE++ Portrait / Subject の LoRA scale を動的切替。
+        ACE++ Stage 切替 (現在は no-op)
 
-        Stage 1 PORTRAIT (素体生成):
-          - ACE++ Portrait → portrait_weight (例: 0.6) ★ active
-          - ACE++ Subject  → 0.0                      ★ inactive
-
-        Stage 2 COORDINATE (着せ替え):
-          - ACE++ Portrait → 0.0                      ★ inactive
-          - ACE++ Subject  → subject_weight (例: 0.6) ★ active
-
-        Nunchaku の update_lora_params() を再呼出して scale を変更する。
-        ※ Fuse 済の LoRA を再 Fuse するだけなので軽量 (数秒以内)。
+        Nunchaku の update_lora_params() が PuLID 注入後に
+        load_state_dict(strict=True) で pulid_ca 不整合により失敗する仕様により、
+        ACE++ の動的切替は実装不可能。互換性のためメソッドは残すが実体は何もしない。
+        顔似度は PuLID + IP-Adapter (scale=0.6) で担保される。
         """
-        if not self.strategy.is_nunchaku():
-            logger.debug("ACE++ 動的切替は Nunchaku 環境のみ対応")
-            return
-
-        tf = self._shared_transformer
-        if tf is None:
-            logger.warning("⚠️ [Phase 2 v2] _shared_transformer が None · LoRA 切替 skip")
-            return
-
-        portrait_path = "/content/drive/MyDrive/aibo_v7/_models/ace_plus/ace_plus_portrait_lora.safetensors"
-        subject_path = "/content/drive/MyDrive/aibo_v7/_models/ace_plus/ace_plus_subject_lora.safetensors"
-
-        try:
-            if stage_mode == "PORTRAIT":
-                # Stage 1: Portrait active / Subject inactive
-                if os.path.exists(portrait_path):
-                    tf.update_lora_params(portrait_path)
-                    tf.set_lora_strength(portrait_weight)
-                if os.path.exists(subject_path):
-                    tf.update_lora_params(subject_path)
-                    tf.set_lora_strength(0.0)
-                logger.info(
-                    f"🎯 [Phase 2 v2] Stage 1 PORTRAIT mode: "
-                    f"Portrait scale={portrait_weight}, Subject scale=0.0"
-                )
-            elif stage_mode == "COORDINATE":
-                # Stage 2: Portrait inactive / Subject active
-                if os.path.exists(portrait_path):
-                    tf.update_lora_params(portrait_path)
-                    tf.set_lora_strength(0.0)
-                if os.path.exists(subject_path):
-                    tf.update_lora_params(subject_path)
-                    tf.set_lora_strength(subject_weight)
-                logger.info(
-                    f"🎯 [Phase 2 v2] Stage 2 COORDINATE mode: "
-                    f"Portrait scale=0.0, Subject scale={subject_weight}"
-                )
-            else:
-                logger.warning(f"⚠️ [Phase 2 v2] 未知の stage_mode: {stage_mode}")
-                return
-
-            # ─── wrap 再設置 (update_lora_params が forward を上書きするため) ──
-            # AIBO の auto_pulid_forward wrap を強制再設置
-            self._wrap_transformer_forward_for_cn(force_reset=True)
-            logger.info("  🔧 [Phase 2 v2] forward wrap 再設置完了 (auto_pulid_forward)")
-        except Exception as e:
-            logger.error(f"❌ [Phase 2 v2] LoRA 動的切替失敗: {e}")
-            import traceback
-
-            traceback.print_exc()
+        logger.debug(
+            f"⏭️ switch_ace_plus_lora_for_stage(stage_mode={stage_mode!r}) · "
+            f"ACE++ 撤去のため no-op"
+        )
+        return
 
     def _inject_hyper_flux_diffusers(self):
         """Diffusers 標準 API · pipe.load_lora_weights()"""
