@@ -25,6 +25,7 @@ Version: v7.2.1
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import time
 from importlib import import_module
@@ -212,7 +213,11 @@ class FaceRestoreEngine:
         if _INSIGHTFACE_APP is None:
             from insightface.app import FaceAnalysis
 
-            insightface_root = "/root/.cache/huggingface/hub/insightface"
+            # antelopev2 モデルは HF_HOME/insightface/models/antelopev2/ に展開される
+            # (PuLID/AIBO の既存 cache をそのまま利用)
+            _hf_cache = os.environ.get("HF_HOME", "/root/.cache/huggingface")
+            insightface_root = os.path.join(_hf_cache, "insightface")
+            logger.info(f"[FaceRestoreEngine] insightface root: {insightface_root}")
             _INSIGHTFACE_APP = FaceAnalysis(
                 name="antelopev2",
                 root=insightface_root,
@@ -277,19 +282,24 @@ class FaceRestoreEngine:
     def _apply_gfpgan(
         self, image: Image.Image, face_bbox: Tuple[int, int, int, int]
     ) -> Image.Image:
-        """GFPGAN v1.4 で顔構造を低強度補正 (URL 自動DL)。"""
+        """GFPGAN v1.4 で顔構造を低強度補正 (ローカル優先 / URL fallback)。"""
         _ = face_bbox
         if self._gfpganer is None:
             from gfpgan import GFPGANer
 
+            # Drive にローカル配置済みなら優先、なければ URL から DL
+            _local_gfpgan = "/content/drive/MyDrive/aibo_v7/gfpgan/weights/GFPGANv1.4.pth"
+            _url_gfpgan = "https://github.com/TencentARC/GFPGAN/releases/download/v1.3.0/GFPGANv1.4.pth"
+            gfpgan_model_path = _local_gfpgan if os.path.exists(_local_gfpgan) else _url_gfpgan
+
             self._gfpganer = GFPGANer(
-                model_path="https://github.com/TencentARC/GFPGAN/releases/download/v1.3.0/GFPGANv1.4.pth",
+                model_path=gfpgan_model_path,
                 upscale=1,
                 arch="clean",
                 channel_multiplier=2,
                 bg_upsampler=None,
             )
-            logger.info("[Phase 3a] GFPGAN v1.4 初回ロード完了 (URL 経由 auto DL)")
+            logger.info(f"[Phase 3a] GFPGAN モデル load: {gfpgan_model_path}")
 
         img_bgr = cv2.cvtColor(np.array(image.convert("RGB")), cv2.COLOR_RGB2BGR)
         _, _, restored_img = self._gfpganer.enhance(
