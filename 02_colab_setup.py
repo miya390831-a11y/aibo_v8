@@ -253,7 +253,7 @@ class DependencyInstaller:
         ("scipy",            ">=1.13.0"), # ⚠️ numpy 2.x 対応
         ("scikit-learn",     ">=1.5.0"),  # ⚠️ scipy/numpy 連動
         ("diffusers",        ">=0.32"),
-        ("transformers",     ">=4.46"),
+        ("transformers",     ">=4.45,<5.0"),  # ⚠️ 5.0+ は diffusers 0.37.x / peft 0.19.x と非互換
         ("accelerate",       ">=1.0"),
         ("peft",             ">=0.13"),
         ("safetensors",      ">=0.4"),
@@ -286,9 +286,43 @@ class DependencyInstaller:
     # これによって ABI 不整合 → 自動再起動の発火を回避し、1 押下完走を実現
     FORCE_REINSTALL_FIRST = ["scipy", "scikit-learn"]
 
+    # transformers 5.0+ は diffusers 0.37.x / peft 0.19.x と非互換のため pin
+    PINNED_VERSIONS = {
+        "transformers": ">=4.45,<5.0",
+    }
+
+    @classmethod
+    def _ensure_pinned_versions(cls) -> None:
+        """PINNED_VERSIONS を満たさない場合は先に force-reinstall"""
+        import importlib.metadata
+        from packaging.specifiers import SpecifierSet
+
+        for pkg, version_spec in cls.PINNED_VERSIONS.items():
+            try:
+                current = importlib.metadata.version(pkg)
+                if SpecifierSet(version_spec).contains(current):
+                    logger.info(f"✅ {pkg} {current} は範囲内 ({version_spec})")
+                    continue
+                logger.info(f"📦 {pkg} {current} は範囲外 ({version_spec}) · 再 install")
+                subprocess.check_call([
+                    sys.executable, "-m", "pip", "install", "-q",
+                    f"{pkg}{version_spec}",
+                    "--force-reinstall", "--no-deps",
+                ])
+                logger.info(f"✅ {pkg} を {version_spec} に pin 完了")
+            except importlib.metadata.PackageNotFoundError:
+                logger.info(f"📦 {pkg} 未 install · {version_spec} で install")
+                subprocess.check_call([
+                    sys.executable, "-m", "pip", "install", "-q",
+                    f"{pkg}{version_spec}",
+                ])
+            except Exception as e:
+                logger.warning(f"⚠️ {pkg} pin チェック失敗: {e}")
+
     @classmethod
     def install_all(cls, *, include_upscale: bool = True) -> dict[str, bool]:
         results = {}
+        cls._ensure_pinned_versions()
         all_pkgs = list(cls.CORE_PACKAGES) + list(cls.PULID_PACKAGES)
         if include_upscale:
             all_pkgs += list(cls.UPSCALE_PACKAGES)
