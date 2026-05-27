@@ -559,7 +559,11 @@ async def _run_portrait_generation(job_id: str, req: GenerateRequest) -> None:
         if getattr(result, "error", None):
             raise RuntimeError(result.error)
         if result.final_image is None:
-            raise RuntimeError("Generation produced no image")
+            fail_reason = getattr(result, "pass1_fail_reason", None) or "unknown"
+            retry_count = getattr(result, "pass1_retry_count", 0)
+            raise RuntimeError(
+                f"Generation produced no image (retries={retry_count}, reason={fail_reason})"
+            )
 
         await _jobs.update(job_id, stage="ENCODING_RESULT", progress=95.0)
         result_b64 = pil_to_b64(result.final_image)

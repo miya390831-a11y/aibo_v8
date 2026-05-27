@@ -275,6 +275,8 @@ class GenerationResult:
     phase3_bypass_reason: str = ""
     phase3_yaw_deg: float = 0.0
     phase3_elapsed_sec: float = 0.0
+    pass1_retry_count: int = 0
+    pass1_fail_reason: Optional[str] = None
 
     # 計測
     elapsed_total_sec: float = 0.0
@@ -309,6 +311,8 @@ class GenerationResult:
             "elapsed_upscale_sec": round(self.elapsed_upscale_sec, 2),
             "saved_path": str(self.saved_path) if self.saved_path else None,
             "error": self.error,
+            "pass1_retry_count": self.pass1_retry_count,
+            "pass1_fail_reason": self.pass1_fail_reason,
         }
         return d
 
@@ -512,12 +516,39 @@ class CharacterOrchestrator:
 
             # ─── 5. Pass 1: txt2img ───
             t0_p1 = time.perf_counter()
-            if id_cfg.enable_multi_cn and (id_cfg.cn_use_pose or id_cfg.cn_use_depth):
-                logger.info(f"🎭 [generate] Multi-CN 経路 (mode={mode.value})")
-                pass1 = self._run_pass1_with_cn(gen_cfg, identity_data, seed)
-            else:
-                logger.info(f"🎭 [generate] PORTRAIT 経路 (mode={mode.value})")
-                pass1 = self._run_pass1(gen_cfg, identity_data, seed)
+            use_cn = id_cfg.enable_multi_cn and (id_cfg.cn_use_pose or id_cfg.cn_use_depth)
+            max_retries = 2
+            last_error_msg = ""
+            pass1 = None
+            for attempt in range(1 + max_retries):
+                attempt_seed = seed if attempt == 0 else int(torch.randint(0, 2**31 - 1, (1,)).item())
+                try:
+                    if use_cn:
+                        if attempt == 0:
+                            logger.info(f"🎭 [generate] Multi-CN 経路 (mode={mode.value})")
+                        pass1 = self._run_pass1_with_cn(gen_cfg, identity_data, attempt_seed)
+                    else:
+                        if attempt == 0:
+                            logger.info(f"🎭 [generate] PORTRAIT 経路 (mode={mode.value})")
+                        pass1 = self._run_pass1(gen_cfg, identity_data, attempt_seed)
+                    break
+                except Exception as e:
+                    last_error_msg = str(e)
+                    result.pass1_retry_count = attempt + 1
+                    if attempt < max_retries:
+                        logger.warning(
+                            "⚠️ [generate] Pass 1 失敗 (attempt %d/%d): %s · seed=%d でリトライ",
+                            attempt + 1, 1 + max_retries, e, attempt_seed,
+                        )
+                        _flush_vram()
+                        time.sleep(1)
+                    else:
+                        logger.error(
+                            "❌ [generate] Pass 1 全リトライ失敗 (%d 回): %s",
+                            1 + max_retries, e,
+                        )
+                        result.pass1_fail_reason = last_error_msg
+
             result.pass1_image = pass1
             result.steps_pass1 = gen_cfg.resolved_steps(
                 self.strategy,
@@ -554,6 +585,10 @@ class CharacterOrchestrator:
                     logger.info(f"⏱ Upscale 完了: {result.elapsed_upscale_sec:.1f}s")
 
             result.final_image = current_image
+            if result.final_image is None:
+                reason = result.pass1_fail_reason or "不明"
+                result.error = f"Pass 1 が画像を生成できなかった (リトライ {result.pass1_retry_count} 回後も失敗: {reason})"
+                logger.error("❌ [generate] final_image が None のまま終了 · %s", result.error)
 
             # ─── 7.5. Phase 3: ハイブリッド γ (オプション) ───
             cfg_mod = import_module("01_config")
@@ -711,12 +746,17 @@ class CharacterOrchestrator:
 
             if hasattr(output, "images") and output.images:
                 return output.images[0]
-            return None
+            msg = (
+                f"pipeline 出力に画像なし (has_images={hasattr(output, 'images')}, "
+                f"len={len(output.images) if hasattr(output, 'images') and output.images is not None else 'N/A'})"
+            )
+            logger.warning("⚠️ [Pass 1] %s", msg)
+            raise RuntimeError(msg)
 
         except Exception as e:
             logger.error(f"❌ [Pass 1] 失敗: {e}")
             logger.error(traceback.format_exc())
-            return None
+            raise
 
     def _run_pass1_with_cn(
         self,
@@ -824,7 +864,12 @@ class CharacterOrchestrator:
 
             if hasattr(output, "images") and output.images:
                 return output.images[0]
-            return None
+            msg = (
+                f"[Pass 1 CN] pipeline 出力に画像なし (has_images={hasattr(output, 'images')}, "
+                f"len={len(output.images) if hasattr(output, 'images') and output.images is not None else 'N/A'})"
+            )
+            logger.warning("⚠️ %s", msg)
+            raise RuntimeError(msg)
 
         except Exception as e:
             logger.error(f"❌ [Pass 1 CN] 失敗: {e}")
