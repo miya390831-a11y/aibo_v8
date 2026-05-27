@@ -291,6 +291,34 @@ class DependencyInstaller:
         "transformers": ">=4.45,<5.0",
     }
 
+    # ABI 互換性を保護するパッケージ
+    # 既存バージョンが要求を満たすなら pip install 自体を skip し、
+    # C 拡張 ABI 不整合 → 自動再起動ループを回避する
+    PROTECT_IF_SATISFIED = {"numpy", "scipy", "scikit-learn"}
+
+    @staticmethod
+    def _get_installed_version(name: str) -> Optional[str]:
+        """現在 install 済みのバージョンを返す (未 install なら None)"""
+        try:
+            import importlib.metadata
+            return importlib.metadata.version(name)
+        except Exception:
+            return None
+
+    @classmethod
+    def _version_satisfies(cls, name: str, version_spec: Optional[str]) -> bool:
+        """install 済みバージョンが version_spec を満たすか判定"""
+        current = cls._get_installed_version(name)
+        if current is None:
+            return False
+        if version_spec is None:
+            return True
+        try:
+            from packaging.specifiers import SpecifierSet
+            return SpecifierSet(version_spec).contains(current)
+        except Exception:
+            return False
+
     @classmethod
     def _ensure_pinned_versions(cls) -> None:
         """PINNED_VERSIONS を満たさない場合は先に force-reinstall"""
@@ -329,11 +357,19 @@ class DependencyInstaller:
 
         logger.info(f"📦 [Deps] {len(all_pkgs)} パッケージを install 開始")
 
+        # numpy バージョンを事前記録 (他パッケージによる間接変更の検知用)
+        _numpy_ver_before = cls._get_installed_version("numpy")
+
         for name, version_spec in all_pkgs:
+            # 保護対象: 既存バージョンが適合なら skip (ABI 不整合回避)
+            if name in cls.PROTECT_IF_SATISFIED and cls._version_satisfies(name, version_spec):
+                current = cls._get_installed_version(name)
+                logger.info(f"   ✅ {name} {current} (既存適合 · skip)")
+                results[name] = True
+                continue
+
             spec = f"{name}{version_spec}" if version_spec else name
 
-            # numpy/scipy/sklearn は --force-reinstall で確実に最新化
-            # (古い C 拡張モジュールが残ると _blas_supports_fpe エラー)
             extra_flags = []
             if name in cls.FORCE_REINSTALL_FIRST:
                 extra_flags = ["--force-reinstall", "--no-deps"]
@@ -353,27 +389,20 @@ class DependencyInstaller:
         ok_count = sum(1 for v in results.values() if v)
         logger.info(f"📦 [Deps] 完了: {ok_count}/{len(results)} success")
 
-        # numpy 強制再 install 後はランタイム自動再起動 (Cell 1 修復セル不要化)
-        # /tmp マーカーで再起動ループを防止 (Colab セッション中は永続)
-        if results.get("numpy", False):
-            import os as _os, sys as _sys, time as _time
-            _marker = "/tmp/.aibo_numpy_reinstalled"
-            if _os.path.exists(_marker):
-                logger.info("✅ [Deps] numpy 再 install 済みマーカー検出、再起動スキップ")
-            else:
-                with open(_marker, "w") as _f:
-                    _f.write("done")
-                logger.warning(
-                    "⚠️ [Deps] numpy が再 install されました。"
-                    "C 拡張 ABI 不整合回避のため自動再起動します。"
-                )
-                print("\n" + "=" * 60)
-                print("🔄 ランタイム自動再起動中...")
-                print("   → 'Reconnect' 後に起動セルを再実行してください")
-                print("=" * 60)
-                _sys.stdout.flush()
-                _time.sleep(2)
-                _os.kill(_os.getpid(), 9)
+        # numpy 変更検知 (os.kill 自動再起動は廃止 · 警告のみ)
+        # PROTECT_IF_SATISFIED により通常は numpy は変更されないが、
+        # 他パッケージの依存で間接的に変更される可能性への安全網
+        _numpy_ver_after = cls._get_installed_version("numpy")
+        if _numpy_ver_before != _numpy_ver_after:
+            logger.warning(
+                f"⚠️ [Deps] numpy バージョン変更: {_numpy_ver_before} → {_numpy_ver_after}\n"
+                f"   C 拡張 ABI 不整合の可能性があります。"
+            )
+            print("\n" + "=" * 60)
+            print(f"⚠️ numpy {_numpy_ver_before} → {_numpy_ver_after}")
+            print("   C 拡張 ABI 不整合の可能性があります。")
+            print("   問題が発生した場合: ランタイム → ランタイムを再起動")
+            print("=" * 60)
 
         return results
 
