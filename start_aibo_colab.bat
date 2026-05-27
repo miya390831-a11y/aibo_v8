@@ -8,9 +8,8 @@ echo   AIBO Cyber Studio · Colab 起動中
 echo  ============================================
 echo.
 
-REM Colab Notebook URL (PO が後で設定する)
-REM 例: https://colab.research.google.com/drive/^<YOUR_NOTEBOOK_ID^>
-set COLAB_URL=https://colab.research.google.com/drive/PASTE_YOUR_NOTEBOOK_ID_HERE
+REM Colab Notebook URL (GitHub ホスト · master 追随)
+set COLAB_URL=https://colab.research.google.com/github/miya390831-a11y/aibo_v8/blob/master/aibo_v7_colab.ipynb#scrollTo=filKR6AT6JR3
 
 REM URL がデフォルト値のままなら警告
 echo %COLAB_URL% | findstr /C:"PASTE_YOUR_NOTEBOOK_ID_HERE" > nul
