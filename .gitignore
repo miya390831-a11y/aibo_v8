@@ -32,3 +32,8 @@ aibo_bridge/.runpod_key_tmp.txt
 # === logs/ (報告は追跡、一時ファイルのみ無視) ===
 logs/*.tmp
 logs/*.lock
+
+# === logs/errors/ (機微情報含む可能性 · .gitkeep のみ追跡) ===
+logs/errors/*.json
+logs/errors/*.md
+!logs/errors/.gitkeep

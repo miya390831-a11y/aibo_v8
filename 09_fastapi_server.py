@@ -588,6 +588,26 @@ async def _run_portrait_generation(job_id: str, req: GenerateRequest) -> None:
         )
     except Exception as exc:
         logger.error("Job %s failed: %s\n%s", job_id, exc, traceback.format_exc())
+        # Drive へエラー自動記録
+        try:
+            from error_reporter import save_error_report
+            save_error_report(
+                error=exc,
+                context={"endpoint": "/api/portrait/generate", "job_id": job_id},
+                request_data={
+                    "prompt": req.prompt,
+                    "seed": req.seed,
+                    "width": req.width,
+                    "height": req.height,
+                    "num_inference_steps": req.num_inference_steps,
+                    "guidance_scale": req.guidance_scale,
+                    "face_references_count": len(req.face_references) if req.face_references else 0,
+                },
+                request_id=job_id,
+                phase="portrait_generation",
+            )
+        except Exception as report_err:
+            logger.warning("error_reporter failed (ignored): %s", report_err)
         await _jobs.update(
             job_id,
             status="failed",
@@ -1069,6 +1089,41 @@ async def library_save(req: LibrarySaveRequest):
         _LIBRARY_MOCK.pop(0)
 
     return {"saved": item, "capacity": f"{len(_LIBRARY_MOCK)}/3 (Free mock)"}
+
+
+# ============================================================
+# Diagnostic endpoints
+# ============================================================
+
+
+@app.get("/api/diagnostics/last_error")
+async def diagnostics_last_error():
+    try:
+        from error_reporter import get_latest_error
+        error = get_latest_error()
+        if not error:
+            return {"status": "no_errors"}
+        return error
+    except Exception as exc:
+        return {"status": "error", "detail": str(exc)}
+
+
+@app.get("/api/diagnostics/recent_errors")
+async def diagnostics_recent_errors(limit: int = 10):
+    try:
+        from error_reporter import list_recent_errors
+        return {"errors": list_recent_errors(limit=min(limit, 20))}
+    except Exception as exc:
+        return {"status": "error", "detail": str(exc)}
+
+
+@app.get("/api/diagnostics/system")
+async def diagnostics_system():
+    try:
+        from error_reporter import _get_system_state, _get_aibo_config
+        return {"system": _get_system_state(), "config": _get_aibo_config()}
+    except Exception as exc:
+        return {"status": "error", "detail": str(exc)}
 
 
 def run_server(host: str = "0.0.0.0", port: int = 8000, log_level: str = "info") -> None:
