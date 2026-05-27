@@ -1,44 +1,42 @@
 @echo off
 chcp 65001 > nul
-title AIBO · Claude Code CLI
+title AIBO · Claude Code CLI [BYPASS MODE]
 
 cd /d C:\Users\yuuki\aibo_v7
 
 echo.
 echo  ============================================
-echo   AIBO Cyber Studio · Claude Code CLI 起動
+echo   AIBO Cyber Studio · Claude Code [BYPASS]
 echo  ============================================
+echo.
+echo   [!] 完全自動モード (承認スキップ)
+echo   [*] 危険コマンドは settings.json で deny 済
 echo.
 echo   作業ディレクトリ: %CD%
 echo   モデル:           Opus 4.7
-echo   引継書:           HANDOVER_2026-05-24_v3.md
+echo   設定ファイル:     %USERPROFILE%\.claude\settings.json
 echo.
 echo  ============================================
-echo.
-echo   起動中... (CLAUDE.md を自動読み込みします)
+echo   注意:
+echo     ファイル編集 / Git / コマンド全て自動承認
+echo     暴走を感じたら Ctrl+C で中断
+echo     致命的なら emergency_stop.bat (デスクトップ)
+echo  ============================================
 echo.
 
-REM Claude Code CLI を起動
-claude
+REM bypass モード起動 (deny rules は settings.json で定義)
+claude --dangerously-skip-permissions
 
-REM エラー処理: claude コマンドが見つからない場合
 if %errorlevel% neq 0 (
     echo.
     echo  ============================================
-    echo   ERROR: Claude Code が起動できませんでした
+    echo   ERROR: Claude Code 起動失敗
     echo  ============================================
     echo.
-    echo   原因の可能性:
-    echo     1. Claude Code が未インストール
-    echo        → PowerShell で以下を実行:
-    echo          irm https://claude.ai/install.ps1 ^| iex
+    echo   対処方法:
+    echo     1. 認証確認: claude auth status
+    echo     2. 再ログイン: claude auth login
+    echo     3. PATH 確認: where claude
     echo.
-    echo     2. PATH が通っていない
-    echo        → C:\Users\yuuki\.local\bin が PATH にあるか確認
-    echo.
-    echo     3. 認証が切れている
-    echo        → claude auth login を実行
-    echo.
-    echo  ============================================
     pause
 )
