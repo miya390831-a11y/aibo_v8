@@ -1,5 +1,5 @@
 ﻿# AIBO Desktop Shortcut Setup
-# Creates: AIBO Cyber Studio, AIBO Claude Code, AIBO Colab
+# Creates: AIBO Cyber Studio, AIBO Claude Code, AIBO Colab, Emergency Stop, Error Diagnostic
 
 $Host.UI.RawUI.WindowTitle = "AIBO · Desktop Setup"
 
@@ -23,7 +23,7 @@ function Get-IconLocation {
 # ============================================
 # 1. AIBO Cyber Studio (既存 · 互換性のため上書き対応)
 # ============================================
-Write-Host "  [1/3] AIBO Cyber Studio ショートカット作成中..." -ForegroundColor Yellow
+Write-Host "  [1/5] AIBO Cyber Studio ショートカット作成中..." -ForegroundColor Yellow
 
 $shortcut1 = $shell.CreateShortcut("$desktop\AIBO Cyber Studio.lnk")
 $shortcut1.TargetPath = "$aiboDir\start_aibo.bat"
@@ -37,7 +37,7 @@ Write-Host "    [OK] $desktop\AIBO Cyber Studio.lnk" -ForegroundColor Green
 # ============================================
 # 2. AIBO Claude Code (新規)
 # ============================================
-Write-Host "  [2/3] AIBO Claude Code ショートカット作成中..." -ForegroundColor Yellow
+Write-Host "  [2/5] AIBO Claude Code ショートカット作成中..." -ForegroundColor Yellow
 
 $shortcut2 = $shell.CreateShortcut("$desktop\AIBO Claude Code.lnk")
 $shortcut2.TargetPath = "$aiboDir\start_claude_code.bat"
@@ -51,7 +51,7 @@ Write-Host "    [OK] $desktop\AIBO Claude Code.lnk" -ForegroundColor Green
 # ============================================
 # 3. AIBO Colab (新規)
 # ============================================
-Write-Host "  [3/3] AIBO Colab ショートカット作成中..." -ForegroundColor Yellow
+Write-Host "  [3/5] AIBO Colab ショートカット作成中..." -ForegroundColor Yellow
 
 $shortcut3 = $shell.CreateShortcut("$desktop\AIBO Colab.lnk")
 $shortcut3.TargetPath = "$aiboDir\start_aibo_colab.bat"
@@ -65,7 +65,7 @@ Write-Host "    [OK] $desktop\AIBO Colab.lnk" -ForegroundColor Green
 # ============================================
 # 4. AIBO Emergency Stop (新規 · 緊急用)
 # ============================================
-Write-Host "  [4/4] AIBO 緊急停止 ショートカット作成中..." -ForegroundColor Yellow
+Write-Host "  [4/5] AIBO Emergency Stop ショートカット作成中..." -ForegroundColor Yellow
 
 $shortcut4 = $shell.CreateShortcut("$desktop\AIBO Emergency Stop.lnk")
 $shortcut4.TargetPath = "$aiboDir\emergency_stop.bat"
@@ -77,17 +77,32 @@ $shortcut4.Save()
 Write-Host "    [OK] $desktop\AIBO Emergency Stop.lnk" -ForegroundColor Green
 
 # ============================================
+# 5. AIBO Error Diagnostic (新規)
+# ============================================
+Write-Host "  [5/5] AIBO Error Diagnostic ショートカット作成中..." -ForegroundColor Yellow
+
+$shortcut5 = $shell.CreateShortcut("$desktop\AIBO Error Diagnostic.lnk")
+$shortcut5.TargetPath = "$aiboDir\start_error_diagnostic.bat"
+$shortcut5.WorkingDirectory = $aiboDir
+$shortcut5.Description = "AIBO · 生成エラー自動解析 (Claude Code)"
+$shortcut5.IconLocation = (Get-IconLocation "diagnostic.ico" "shell32.dll,23")
+$shortcut5.Save()
+
+Write-Host "    [OK] $desktop\AIBO Error Diagnostic.lnk" -ForegroundColor Green
+
+# ============================================
 # 結果サマリ
 # ============================================
 Write-Host ""
 Write-Host " ============================================" -ForegroundColor Cyan
-Write-Host "  作成完了 (4 アイコン)" -ForegroundColor Cyan
+Write-Host "  作成完了 (5 アイコン)" -ForegroundColor Cyan
 Write-Host " ============================================" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "  AIBO Cyber Studio        -> start_aibo.bat" -ForegroundColor White
 Write-Host "  AIBO Claude Code         -> start_claude_code.bat [BYPASS]" -ForegroundColor White
 Write-Host "  AIBO Colab               -> start_aibo_colab.bat" -ForegroundColor White
 Write-Host "  AIBO Emergency Stop      -> emergency_stop.bat" -ForegroundColor Red
+Write-Host "  AIBO Error Diagnostic    -> start_error_diagnostic.bat" -ForegroundColor Magenta
 Write-Host ""
 Write-Host "  [NOTE]" -ForegroundColor Yellow
 Write-Host "    - icons\ フォルダにアイコン画像がない場合は default アイコン" -ForegroundColor Gray
