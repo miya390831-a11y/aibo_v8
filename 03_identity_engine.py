@@ -98,6 +98,9 @@ class PuLIDExtractor:
         self.pulid_pipeline = None      # 公式 PuLIDPipeline インスタンス
         self.dummy_transformer = None
         self._initialized = False
+        self._last_init_error: Optional[str] = None
+        self._init_fail_time: Optional[float] = None
+        self._INIT_RETRY_COOLDOWN = 30  # seconds
 
     # ─── 遅延初期化 ───
 
@@ -105,6 +108,17 @@ class PuLIDExtractor:
         """初回使用時にロード (起動時間短縮)"""
         if self._initialized:
             return True
+
+        import time as _time
+        if self._init_fail_time is not None:
+            elapsed = _time.time() - self._init_fail_time
+            if elapsed < self._INIT_RETRY_COOLDOWN:
+                logger.warning(
+                    f"⏳ [PuLIDExtractor] lazy_init cooldown 中 "
+                    f"({elapsed:.0f}s/{self._INIT_RETRY_COOLDOWN}s) · "
+                    f"前回エラー: {self._last_init_error}"
+                )
+                return False
 
         # PuLID 公式リポを sys.path に
         if self.PULID_DIR not in sys.path:
@@ -114,8 +128,10 @@ class PuLIDExtractor:
         try:
             from pulid.pipeline_flux import PuLIDPipeline
         except (ImportError, AttributeError) as e:
+            self._last_init_error = f"PuLIDPipeline import 失敗: {e}"
+            self._init_fail_time = _time.time()
             logger.error(
-                f"❌ [PuLIDExtractor] PuLIDPipeline import 失敗: {e}\n"
+                f"❌ [PuLIDExtractor] {self._last_init_error}\n"
                 f"   原因候補:\n"
                 f"     - numpy 2.x と scipy/insightface の互換性\n"
                 f"     - facexlib のバージョン不一致\n"
@@ -144,7 +160,9 @@ class PuLIDExtractor:
                 weight_dtype=self.dtype,
             )
         except Exception as e:
-            logger.error(f"❌ [PuLIDExtractor] PuLIDPipeline インスタンス化失敗: {e}")
+            self._last_init_error = f"PuLIDPipeline インスタンス化失敗: {e}"
+            self._init_fail_time = _time.time()
+            logger.error(f"❌ [PuLIDExtractor] {self._last_init_error}")
             return False
 
         # PuLID v0.9.0 (Identity 優先版) の重みをロード
@@ -158,7 +176,9 @@ class PuLIDExtractor:
             )
             self.pulid_pipeline.load_pretrain(ckpt_path)
         except Exception as e:
-            logger.error(f"❌ [PuLIDExtractor] 重みロード失敗: {e}")
+            self._last_init_error = f"重みロード失敗: {e}"
+            self._init_fail_time = _time.time()
+            logger.error(f"❌ [PuLIDExtractor] {self._last_init_error}")
             return False
 
         logger.info("✅ [PuLIDExtractor] PuLID v0.9.0 (Identity 優先) 初期化完了")
@@ -218,7 +238,8 @@ class PuLIDExtractor:
         self._last_extract_error = None
 
         if not self.lazy_init():
-            self._last_extract_error = "PuLID pipeline lazy_init 失敗"
+            reason = self._last_init_error or "不明"
+            self._last_extract_error = f"PuLID pipeline lazy_init 失敗: {reason}"
             return None, None
 
         original_pil = face_image if hasattr(face_image, "convert") else None
