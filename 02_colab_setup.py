@@ -448,6 +448,125 @@ class PuLIDOfficialFetcher:
 
 
 # ============================================================================
+# 🔄 Section 2.3b · Drive ↔ NVMe 二段キャッシュ同期
+# ============================================================================
+
+class DriveNvmeCacheSync:
+    """
+    Drive (永続 40-100 MB/s) ↔ /content NVMe (高速 1-2 GB/s) の二段キャッシュ同期。
+
+    rsync は Drive FUSE でハングすることがあるため廃止。
+    代替:
+        1. tar pipe (timeout 付き)
+        2. symlink fallback (コピー不要 · Drive 帯域で妥協)
+    """
+
+    def __init__(
+        self,
+        drive_cache: str,
+        nvme_cache: str,
+        timeout_sec: int = 180,
+    ):
+        self.drive_cache = Path(drive_cache)
+        self.nvme_cache = Path(nvme_cache)
+        self.timeout_sec = timeout_sec
+
+    @staticmethod
+    def _du_bytes(path: str) -> int:
+        try:
+            return int(subprocess.check_output(
+                ["du", "-sb", path], stderr=subprocess.DEVNULL
+            ).split()[0])
+        except Exception:
+            return 0
+
+    def needs_sync(self, threshold: float = 0.95) -> bool:
+        """NVMe cache が Drive の threshold 未満なら True"""
+        drive_size = self._du_bytes(str(self.drive_cache))
+        nvme_size = self._du_bytes(str(self.nvme_cache))
+        if drive_size == 0:
+            return False
+        logger.info(
+            f"📦 [CacheSync] Drive: {drive_size / 1e9:.1f}GB · "
+            f"NVMe: {nvme_size / 1e9:.1f}GB "
+            f"({nvme_size / max(drive_size, 1) * 100:.0f}%)"
+        )
+        return nvme_size < drive_size * threshold
+
+    def sync_to_nvme(self) -> str:
+        """Drive → NVMe 同期 (起動時)
+
+        Returns: "tar" | "symlink" | "skip"
+        """
+        self.drive_cache.mkdir(parents=True, exist_ok=True)
+        self.nvme_cache.mkdir(parents=True, exist_ok=True)
+
+        if not self.needs_sync():
+            logger.info("✅ [CacheSync] NVMe cache 十分 · sync スキップ")
+            return "skip"
+
+        drive_gb = self._du_bytes(str(self.drive_cache)) / 1e9
+        logger.info(f"⏳ [CacheSync] Drive → NVMe 同期中 ({drive_gb:.1f}GB, timeout={self.timeout_sec}s)...")
+        t0 = time.time()
+
+        # Method 1: tar pipe (timeout 付き)
+        try:
+            cmd = f'tar cf - -C "{self.drive_cache}" . | tar xf - -C "{self.nvme_cache}"'
+            r = subprocess.run(
+                ["bash", "-c", cmd],
+                capture_output=True, text=True,
+                timeout=self.timeout_sec,
+            )
+            if r.returncode == 0:
+                logger.info(f"✅ [CacheSync] tar pipe 完了 ({time.time() - t0:.1f}s)")
+                return "tar"
+            logger.warning(f"⚠️ [CacheSync] tar pipe 失敗: {(r.stderr or '')[-200:]}")
+        except subprocess.TimeoutExpired:
+            logger.warning(f"⚠️ [CacheSync] tar pipe timeout ({self.timeout_sec}s)")
+        except Exception as e:
+            logger.warning(f"⚠️ [CacheSync] tar pipe 例外: {e}")
+
+        # Method 2: symlink fallback (Drive 帯域で妥協)
+        logger.info("🔗 [CacheSync] symlink fallback (Drive 直結 · NVMe 高速化なし)")
+        try:
+            if self.nvme_cache.is_symlink():
+                self.nvme_cache.unlink()
+            elif self.nvme_cache.exists():
+                shutil.rmtree(self.nvme_cache)
+            os.symlink(str(self.drive_cache), str(self.nvme_cache))
+            logger.info(f"✅ [CacheSync] symlink: {self.nvme_cache} → {self.drive_cache}")
+            return "symlink"
+        except Exception as e:
+            logger.error(f"❌ [CacheSync] symlink fallback も失敗: {e}")
+            raise
+
+    def sync_to_drive(self) -> bool:
+        """NVMe → Drive 同期 (新規 DL の永続化)"""
+        if self.nvme_cache.is_symlink():
+            logger.info("ℹ️ [CacheSync] symlink モード · Drive 直結のため sync 不要")
+            return True
+
+        logger.info("⏳ [CacheSync] NVMe → Drive 書き戻し中...")
+        t0 = time.time()
+        try:
+            cmd = f'tar cf - -C "{self.nvme_cache}" . | tar xf - -C "{self.drive_cache}"'
+            r = subprocess.run(
+                ["bash", "-c", cmd],
+                capture_output=True, text=True,
+                timeout=self.timeout_sec * 2,
+            )
+            if r.returncode == 0:
+                logger.info(f"✅ [CacheSync] Drive 書き戻し完了 ({time.time() - t0:.1f}s)")
+                return True
+            logger.warning(f"⚠️ [CacheSync] 書き戻し tar 失敗: {(r.stderr or '')[-200:]}")
+        except subprocess.TimeoutExpired:
+            logger.warning(f"⚠️ [CacheSync] 書き戻し timeout ({self.timeout_sec * 2}s)")
+        except Exception as e:
+            logger.warning(f"⚠️ [CacheSync] 書き戻し例外: {e}")
+        return False
+
+
+# ============================================================================
 # 💾 Section 2.4 · GDrive Checkpointer (5 分間隔同期)
 # ============================================================================
 
@@ -475,10 +594,12 @@ class GDriveCheckpointer:
         self._last_sync_at: Optional[float] = None
         self._last_sync_ok: bool = False
 
+    SYNC_TIMEOUT_SEC: int = 120
+
     # ─── 単発同期 ───
 
     def sync_once(self) -> bool:
-        """1 回の差分同期を実行"""
+        """1 回の同期を実行 (tar pipe · timeout 付き · rsync 廃止)"""
 
         if not self.local_dir.exists():
             self.local_dir.mkdir(parents=True, exist_ok=True)
@@ -490,26 +611,33 @@ class GDriveCheckpointer:
                 logger.warning(f"⚠️ [GDriveCheckpointer] drive_dir 作成失敗: {e}")
                 return False
 
-        # rsync が利用できればそれを使う、なければ shutil で代替
-        if shutil.which("rsync"):
-            cmd = [
-                "rsync", "-a", "--delete-after",
-                f"{self.local_dir}/",
-                f"{self.drive_dir}/",
-            ]
-            r = subprocess.run(cmd, capture_output=True, text=True)
+        ok = False
+
+        # Method 1: tar pipe (rsync 代替 · Drive FUSE ハング回避)
+        try:
+            cmd = f'tar cf - -C "{self.local_dir}" . | tar xf - -C "{self.drive_dir}"'
+            r = subprocess.run(
+                ["bash", "-c", cmd],
+                capture_output=True, text=True,
+                timeout=self.SYNC_TIMEOUT_SEC,
+            )
             ok = r.returncode == 0
             if not ok:
-                logger.warning(f"⚠️ [GDriveCheckpointer] rsync 失敗: {(r.stderr or '')[-200:]}")
-        else:
-            # shutil フォールバック (Drive のディレクトリ全体をコピー)
+                logger.warning(f"⚠️ [GDriveCheckpointer] tar pipe 失敗: {(r.stderr or '')[-200:]}")
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                f"⚠️ [GDriveCheckpointer] tar pipe timeout ({self.SYNC_TIMEOUT_SEC}s) · shutil fallback"
+            )
+        except Exception as e:
+            logger.warning(f"⚠️ [GDriveCheckpointer] tar pipe 例外: {e}")
+
+        # Method 2: shutil fallback
+        if not ok:
             try:
-                if self.drive_dir.exists():
-                    shutil.rmtree(self.drive_dir)
-                shutil.copytree(self.local_dir, self.drive_dir)
+                shutil.copytree(self.local_dir, self.drive_dir, dirs_exist_ok=True)
                 ok = True
             except Exception as e:
-                logger.warning(f"⚠️ [GDriveCheckpointer] shutil コピー失敗: {e}")
+                logger.warning(f"⚠️ [GDriveCheckpointer] shutil fallback 失敗: {e}")
                 ok = False
 
         self._sync_count += 1
