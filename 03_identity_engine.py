@@ -524,10 +524,8 @@ class NunchakuPuLIDBinder:
     def bind_forward(self, transformer) -> bool:
         """
         nunchaku.models.pulid.pulid_forward を transformer.forward に MethodType でバインド。
+        毎回再バインドして wrapper チェーン蓄積・参照消失を防止する。
         """
-        if self._forward_bound:
-            return True
-
         try:
             from nunchaku.models.pulid.pulid_forward import pulid_forward as nc_pulid_forward
         except ImportError as e:
@@ -537,8 +535,12 @@ class NunchakuPuLIDBinder:
 
         try:
             transformer.forward = MethodType(nc_pulid_forward, transformer)
+            rebind = self._forward_bound
             self._forward_bound = True
-            logger.info("✅ [NunchakuPuLIDBinder] pulid_forward を transformer にバインド完了")
+            if rebind:
+                logger.info("🔄 [NunchakuPuLIDBinder] pulid_forward を再バインド (チェーンリセット)")
+            else:
+                logger.info("✅ [NunchakuPuLIDBinder] pulid_forward を transformer にバインド完了")
             return True
         except Exception as e:
             logger.error(f"❌ [NunchakuPuLIDBinder] バインド失敗: {e}")

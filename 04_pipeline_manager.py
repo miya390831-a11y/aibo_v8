@@ -728,8 +728,19 @@ class FluxA100PipelineManager:
             """
             # PORTRAIT 経路 (id_embeddings 既に渡されてる) → そのまま透過
             if "id_embeddings" in kwargs and kwargs["id_embeddings"] is not None:
-                # original_pulid_forward は MethodType でバインド済 = self_tf 自動付与
-                return original_pulid_forward(*args, **kwargs)
+                try:
+                    return original_pulid_forward(*args, **kwargs)
+                except TypeError as _te:
+                    if "id_embeddings" in str(_te):
+                        logger.error(
+                            "❌ [Stage 3b] pulid_forward バインド消失を検知 · "
+                            "フォールバック: nc_pulid_forward を直接呼び出し"
+                        )
+                        from nunchaku.models.pulid.pulid_forward import (
+                            pulid_forward as _fallback_fwd,
+                        )
+                        return _fallback_fwd(self_tf, *args, **kwargs)
+                    raise
 
             # COORDINATE/SITUATION 経路 (CN pipeline 経由) → 自動注入
             if hasattr(self_tf, "_pulid_id_embeds") and self_tf._pulid_id_embeds is not None:
@@ -790,7 +801,19 @@ class FluxA100PipelineManager:
                     object.__setattr__(self_tf, "_auto_ip_inject_count", _ip_n_log + 1)
 
             # original_pulid_forward は MethodType でバインド済 = self_tf 自動付与
-            return original_pulid_forward(*args, **kwargs)
+            try:
+                return original_pulid_forward(*args, **kwargs)
+            except TypeError as _te:
+                if "id_embeddings" in str(_te):
+                    logger.error(
+                        "❌ [Stage 3b] CN 経路: pulid_forward バインド消失 · "
+                        "フォールバック: nc_pulid_forward 直接呼び出し"
+                    )
+                    from nunchaku.models.pulid.pulid_forward import (
+                        pulid_forward as _fallback_fwd,
+                    )
+                    return _fallback_fwd(self_tf, *args, **kwargs)
+                raise
 
         # ★ MethodType でバインド (binder.bind_forward と同じ流儀)
         tf.forward = MethodType(auto_pulid_forward, tf)
