@@ -28,3 +28,7 @@ _*.py
 aibo_bridge/.tokens_tmp.txt
 aibo_bridge/.tokens_*.txt
 aibo_bridge/.runpod_key_tmp.txt
+
+# === logs/ (報告は追跡、一時ファイルのみ無視) ===
+logs/*.tmp
+logs/*.lock
