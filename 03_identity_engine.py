@@ -194,6 +194,9 @@ class PuLIDExtractor:
             return self._extract_quality_weighted(face_image, bypass_pre_crop=bypass_pre_crop)
         return self._extract_single(face_image, bypass_pre_crop=bypass_pre_crop)
 
+    def _pil_to_bgr(self, pil_img: Image.Image) -> np.ndarray:
+        return cv2.cvtColor(np.array(pil_img.convert("RGB")), cv2.COLOR_RGB2BGR)
+
     @torch.no_grad()
     def _extract_single(
         self,
@@ -202,6 +205,7 @@ class PuLIDExtractor:
     ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         顔画像から ID Embedding と uncond Embedding を抽出 (単一画像)。
+        1st attempt 失敗時に 768px リサイズでリトライする。
 
         Args:
             face_image: PIL Image (RGB) または np.ndarray (BGR)
@@ -211,25 +215,23 @@ class PuLIDExtractor:
             (id_embeds, uncond_id_embeds) · 共に (1, 32, 2048) bfloat16
             失敗時は (None, None)
         """
+        self._last_extract_error = None
+
         if not self.lazy_init():
+            self._last_extract_error = "PuLID pipeline lazy_init 失敗"
             return None, None
 
+        original_pil = face_image if hasattr(face_image, "convert") else None
+
         try:
-            # PIL → BGR numpy に変換
             if hasattr(face_image, "convert"):
                 face_image = face_image.convert("RGB")
-                # ⚠️ pre_crop は v6 では YOLO 経由だったが、v7 では IPAdapterEngine 側
-                # と統一するため、ここではバイパスのみサポート
-                # (将来 PassZeroSniper クラスを Section 4 等に追加予定)
                 if not bypass_pre_crop:
                     logger.info("ℹ️ [PuLIDExtractor] pre_crop は v7.2 では非実装 · そのまま PuLID 内部処理に委譲")
-
-                import cv2
                 image_bgr = cv2.cvtColor(np.array(face_image), cv2.COLOR_RGB2BGR)
             else:
                 image_bgr = face_image
 
-            # 公式 API で一気に抽出 (InsightFace → EVA-CLIP → BiSeNet → MLP)
             id_embeds, uncond_embeds = self.pulid_pipeline.get_id_embedding(
                 image_bgr,
                 cal_uncond=True,
@@ -239,8 +241,33 @@ class PuLIDExtractor:
             logger.info(f"✅ [PuLIDExtractor] ID embedding 抽出完了: shape={shape_str}")
             return id_embeds, uncond_embeds
 
-        except Exception as e:
-            logger.error(f"❌ [PuLIDExtractor] 抽出失敗: {e}")
+        except Exception as e1:
+            logger.warning(f"⚠️ [PuLIDExtractor] 1st attempt 失敗: {e1}")
+
+            if original_pil is not None:
+                _RETRY_SIZE = 768
+                try:
+                    resized = original_pil.copy()
+                    resized.thumbnail((_RETRY_SIZE, _RETRY_SIZE), Image.LANCZOS)
+                    logger.info(f"🔄 [PuLIDExtractor] リサイズ {original_pil.size}→{resized.size} でリトライ")
+                    image_bgr = self._pil_to_bgr(resized)
+
+                    id_embeds, uncond_embeds = self.pulid_pipeline.get_id_embedding(
+                        image_bgr,
+                        cal_uncond=True,
+                    )
+
+                    shape_str = tuple(id_embeds.shape) if hasattr(id_embeds, "shape") else "?"
+                    logger.info(f"✅ [PuLIDExtractor] リサイズ後リトライ成功: shape={shape_str}")
+                    return id_embeds, uncond_embeds
+
+                except Exception as e2:
+                    self._last_extract_error = f"1st: {e1} / resize-retry: {e2}"
+                    logger.error(f"❌ [PuLIDExtractor] リサイズ後リトライも失敗: {e2}")
+                    return None, None
+
+            self._last_extract_error = str(e1)
+            logger.error(f"❌ [PuLIDExtractor] 抽出失敗 (ndarray入力 · リトライ不可): {e1}")
             return None, None
 
     # ─── Quality-Weighted Mean 集約 (Phase A · burstiness 緩和) ───
@@ -301,18 +328,22 @@ class PuLIDExtractor:
         logger.info(f"🎭 [PuLIDExtractor] {len(face_images)} 枚から Quality-Weighted Mean 集約開始")
 
         scored: list[dict] = []
+        per_image_errors: list[str] = []
         for i, img in enumerate(face_images):
             _id, _u = self._extract_single(img, bypass_pre_crop=bypass_pre_crop)
             if _id is None:
-                logger.warning(f"  ⚠️ [{i+1}/{len(face_images)}] 抽出失敗 · スキップ")
+                err_detail = getattr(self, "_last_extract_error", None) or "unknown"
+                per_image_errors.append(f"[{i+1}] {err_detail}")
+                logger.warning(f"  ⚠️ [{i+1}/{len(face_images)}] 抽出失敗 · スキップ (reason: {err_detail})")
                 continue
             quality = self._compute_quality_score(img)
             scored.append({"id": _id, "uncond": _u, "quality": quality})
             logger.info(f"  [{i+1}/{len(face_images)}] quality={quality:.3f}")
 
         if not scored:
-            logger.error("❌ [PuLIDExtractor] 有効な参照画像が 0 枚 · 集約不可")
-            raise RuntimeError("有効な参照画像が 0 枚 (quality-weighted 集約)")
+            detail = " / ".join(per_image_errors)
+            logger.error(f"❌ [PuLIDExtractor] 有効な参照画像が 0 枚 · 集約不可 (details: {detail})")
+            raise RuntimeError(f"有効な参照画像が 0 枚 (quality-weighted 集約) — per-image: {detail}")
 
         if len(scored) == 1:
             return scored[0]["id"], scored[0]["uncond"]
