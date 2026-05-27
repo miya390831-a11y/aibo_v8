@@ -80,7 +80,9 @@ PHASE3B_ENABLED: bool = False
 FILL_USE_CPU_OFFLOAD: bool = True
 MAIN_PIPELINE_CPU_DURING_FILL: bool = True
 
-GFPGAN_STRENGTH: float = 0.35
+# 2026-05-23: O3 コンサル + 実機検証で default OFF に確定
+# 旧 0.35 は Phase 3a silent fail 時代の値で、実機では顔の個性を均しすぎた
+GFPGAN_STRENGTH: float = 0.0
 FILL_DENOISING: float = 0.25
 ANGLE_BYPASS_YAW_DEG: float = 35.0
 FACE_MASK_FEATHER_PX: int = 21
@@ -292,8 +294,8 @@ class GenerationConfig:
 
     # Pass 2 (顔リファイン)
     enable_pass2: bool = True
-    pass2_strength: float = 0.45
-    pass2_pulid_boost: float = 1.5
+    pass2_strength: float = 0.34         # 旧 0.45 → 0.34
+    pass2_pulid_boost: float = 1.25      # 旧 1.5 → 1.25
 
     # Upscale
     enable_upscale: bool = False
@@ -331,12 +333,13 @@ class IdentityConfig:
                                #    PuLID 0.7/0.85/1.0 すべて大差なし (エネルギー総量一定の法則)
                                # ※ プラスチック化リスク最小化のため 0.7 採用
                                # ※ IP-Adapter 0.6 + ACE++ 0.6 + PuLID 0.7 の 3 段並列構成
-    pulid_sigma_start: float = 0.2        # Late Activation
-    pulid_sigma_end: float = 1.0
+    # 2026-05-23: O3 コンサル + 実機検証で Setting A に刷新
+    pulid_sigma_start: float = 0.25           # 旧 0.2 → 0.25
+    pulid_sigma_end: float = 0.90             # 旧 1.0 → 0.90
     pulid_double_interval: int = 2
 
     # IP-Adapter Plus Face
-    ip_adapter_weight: float = 0.6  # v7.4.0 並列黄金値 (Phase 1 ACE++ 統合 · 2026-05-13)
+    ip_adapter_weight: float = 0.75  # 旧 0.6 → 0.75 (ACE++ 撤去分を補填)
                                     # ※ ACE++ との競合を避けるため 1.0 → 0.6 へ半減
 
     # ─── ACE++ Portrait LoRA (v7.4.0 Phase 1 NEW) ──
@@ -370,7 +373,7 @@ class IdentityConfig:
     cn_depth_weight: float = 0.7  # 公式 0.8 をやや弱化 → 立体感 + プロンプト忠実度のバランス
 
     cn_pose_guidance_end: float = 0.65  # Pose CN を効かせる範囲 (timestep 比率 · 65% 過ぎたら CN OFF 想定)
-    cn_depth_guidance_end: float = 0.80  # Depth を Pose より長く効かせて立体感維持
+    cn_depth_guidance_end: float = 0.65  # 旧 0.80 → 0.65 (顔ディテール解放)
 
     cn_use_pose: bool = True   # Multi-CN 内で Pose を有効化
     cn_use_depth: bool = True  # Multi-CN 内で Depth を有効化 (AI 画像感を抑える主役)
