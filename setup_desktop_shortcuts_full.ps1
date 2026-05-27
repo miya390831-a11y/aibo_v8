@@ -1,4 +1,4 @@
-# AIBO Desktop Shortcut Setup
+﻿# AIBO Desktop Shortcut Setup
 # Creates: AIBO Cyber Studio, AIBO Claude Code, AIBO Colab
 
 $Host.UI.RawUI.WindowTitle = "AIBO · Desktop Setup"
@@ -29,7 +29,7 @@ $shortcut1 = $shell.CreateShortcut("$desktop\AIBO Cyber Studio.lnk")
 $shortcut1.TargetPath = "$aiboDir\start_aibo.bat"
 $shortcut1.WorkingDirectory = $aiboDir
 $shortcut1.Description = "AIBO Cyber Studio · バックエンド + フロントエンド起動"
-$shortcut1.IconLocation = Get-IconLocation "aibo.ico" "shell32.dll,13"
+$shortcut1.IconLocation = (Get-IconLocation "aibo.ico" "shell32.dll,13")
 $shortcut1.Save()
 
 Write-Host "    [OK] $desktop\AIBO Cyber Studio.lnk" -ForegroundColor Green
@@ -43,7 +43,7 @@ $shortcut2 = $shell.CreateShortcut("$desktop\AIBO Claude Code.lnk")
 $shortcut2.TargetPath = "$aiboDir\start_claude_code.bat"
 $shortcut2.WorkingDirectory = $aiboDir
 $shortcut2.Description = "AIBO Cyber Studio · Claude Code CLI 開発環境"
-$shortcut2.IconLocation = Get-IconLocation "claude.ico" "shell32.dll,25"
+$shortcut2.IconLocation = (Get-IconLocation "claude.ico" "shell32.dll,25")
 $shortcut2.Save()
 
 Write-Host "    [OK] $desktop\AIBO Claude Code.lnk" -ForegroundColor Green
@@ -57,7 +57,7 @@ $shortcut3 = $shell.CreateShortcut("$desktop\AIBO Colab.lnk")
 $shortcut3.TargetPath = "$aiboDir\start_aibo_colab.bat"
 $shortcut3.WorkingDirectory = $aiboDir
 $shortcut3.Description = "AIBO Cyber Studio · Colab Notebook 起動"
-$shortcut3.IconLocation = Get-IconLocation "colab.ico" "shell32.dll,14"
+$shortcut3.IconLocation = (Get-IconLocation "colab.ico" "shell32.dll,14")
 $shortcut3.Save()
 
 Write-Host "    [OK] $desktop\AIBO Colab.lnk" -ForegroundColor Green
