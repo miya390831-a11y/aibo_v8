@@ -411,9 +411,17 @@ class IdentityConfig:
         - 'base' (CC-BY-NC): 使わない (中途半端)
     """
 
+    def get_reference_images(self) -> list[Image.Image]:
+        """参照画像リストを取得 (新旧 API 統一)"""
+        if self.reference_images:
+            return self.reference_images
+        if self.reference_image:
+            return [self.reference_image]
+        return []
+
     def resolved_pulid_weight(self, strategy: RuntimeStrategy) -> float:
         """環境別の推奨 PuLID weight を返す
-        
+
         pulid_weight < 0  → auto (環境別デフォルト)
         pulid_weight >= 0 → 明示指定値をそのまま使う
         """
