@@ -512,12 +512,23 @@ class CharacterOrchestrator:
 
             # ─── 5. Pass 1: txt2img ───
             t0_p1 = time.perf_counter()
-            if id_cfg.enable_multi_cn and (id_cfg.cn_use_pose or id_cfg.cn_use_depth):
+            use_cn = id_cfg.enable_multi_cn and (id_cfg.cn_use_pose or id_cfg.cn_use_depth)
+            if use_cn:
                 logger.info(f"🎭 [generate] Multi-CN 経路 (mode={mode.value})")
                 pass1 = self._run_pass1_with_cn(gen_cfg, identity_data, seed)
             else:
                 logger.info(f"🎭 [generate] PORTRAIT 経路 (mode={mode.value})")
                 pass1 = self._run_pass1(gen_cfg, identity_data, seed)
+
+            if pass1 is None:
+                retry_seed = (seed + 1) % (2**32)
+                logger.warning("⚠️ [generate] Pass 1 が None · seed=%d でリトライ (1/1)", retry_seed)
+                _flush_vram()
+                if use_cn:
+                    pass1 = self._run_pass1_with_cn(gen_cfg, identity_data, retry_seed)
+                else:
+                    pass1 = self._run_pass1(gen_cfg, identity_data, retry_seed)
+
             result.pass1_image = pass1
             result.steps_pass1 = gen_cfg.resolved_steps(
                 self.strategy,
@@ -554,6 +565,9 @@ class CharacterOrchestrator:
                     logger.info(f"⏱ Upscale 完了: {result.elapsed_upscale_sec:.1f}s")
 
             result.final_image = current_image
+            if result.final_image is None:
+                result.error = "Pass 1 が画像を生成できなかった (リトライ後も失敗)"
+                logger.error("❌ [generate] final_image が None のまま終了 · error を設定")
 
             # ─── 7.5. Phase 3: ハイブリッド γ (オプション) ───
             cfg_mod = import_module("01_config")
@@ -711,6 +725,11 @@ class CharacterOrchestrator:
 
             if hasattr(output, "images") and output.images:
                 return output.images[0]
+            logger.warning(
+                "⚠️ [Pass 1] pipeline 出力に画像なし (has_images=%s, len=%s)",
+                hasattr(output, "images"),
+                len(output.images) if hasattr(output, "images") and output.images is not None else "N/A",
+            )
             return None
 
         except Exception as e:
@@ -824,6 +843,11 @@ class CharacterOrchestrator:
 
             if hasattr(output, "images") and output.images:
                 return output.images[0]
+            logger.warning(
+                "⚠️ [Pass 1 CN] pipeline 出力に画像なし (has_images=%s, len=%s)",
+                hasattr(output, "images"),
+                len(output.images) if hasattr(output, "images") and output.images is not None else "N/A",
+            )
             return None
 
         except Exception as e:
