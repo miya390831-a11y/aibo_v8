@@ -165,21 +165,47 @@ class PuLIDExtractor:
         self._initialized = True
         return True
 
-    # ─── 単一画像からの ID 抽出 ───
+    # ─── ID 抽出 (単一 or 複数対応) ───
 
     @torch.no_grad()
     def extract(
+        self,
+        face_image,
+        bypass_pre_crop: bool = False,
+    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """単一 or 複数画像から PuLID embedding を抽出。
+
+        複数画像の場合: quality-weighted mean 集約 (Phase A)
+        単一画像の場合: 従来動作 (後方互換)
+
+        Args:
+            face_image: PIL Image (RGB) or list[PIL Image]
+            bypass_pre_crop: 既にクロップ済なら True
+
+        Returns:
+            (id_embeds, uncond_id_embeds) · 共に (1, 32, 2048) bfloat16
+            失敗時は (None, None)
+        """
+        if isinstance(face_image, list):
+            if len(face_image) == 0:
+                return None, None
+            if len(face_image) == 1:
+                return self._extract_single(face_image[0], bypass_pre_crop=bypass_pre_crop)
+            return self._extract_quality_weighted(face_image, bypass_pre_crop=bypass_pre_crop)
+        return self._extract_single(face_image, bypass_pre_crop=bypass_pre_crop)
+
+    @torch.no_grad()
+    def _extract_single(
         self,
         face_image: Image.Image,
         bypass_pre_crop: bool = False,
     ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
-        顔画像から ID Embedding と uncond Embedding を抽出。
+        顔画像から ID Embedding と uncond Embedding を抽出 (単一画像)。
 
         Args:
             face_image: PIL Image (RGB) または np.ndarray (BGR)
             bypass_pre_crop: 既にクロップ済の純度 100% 入力なら True
-                            (LATE SNIPER モード · 二重クロップ排除)
 
         Returns:
             (id_embeds, uncond_id_embeds) · 共に (1, 32, 2048) bfloat16
@@ -217,7 +243,115 @@ class PuLIDExtractor:
             logger.error(f"❌ [PuLIDExtractor] 抽出失敗: {e}")
             return None, None
 
-    # ─── 複数画像合成 (Norm-Preserved Mean · v6 SOUL SYNERGY) ───
+    # ─── Quality-Weighted Mean 集約 (Phase A · burstiness 緩和) ───
+
+    def _compute_quality_score(self, image: Image.Image) -> float:
+        """参照画像の品質スコア (0-1) · InsightFace ベース"""
+        if self.pulid_pipeline is None:
+            return 0.5
+
+        face_app = getattr(self.pulid_pipeline, "app", None)
+        if face_app is None:
+            return 0.5
+
+        img_array = np.array(image.convert("RGB"))
+        img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+
+        try:
+            faces = face_app.get(img_bgr)
+        except Exception as e:
+            logger.warning(f"⚠️ [QualityScore] InsightFace 検出失敗: {e}")
+            return 0.3
+
+        if not faces:
+            return 0.1
+
+        face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
+        x1, y1, x2, y2 = map(int, face.bbox)
+        face_crop = img_bgr[max(0, y1):y2, max(0, x1):x2]
+
+        face_area = (x2 - x1) * (y2 - y1)
+        image_area = img_array.shape[0] * img_array.shape[1]
+        size_score = min(face_area / max(image_area, 1) * 5.0, 1.0)
+
+        sharpness_score = 0.0
+        if face_crop.size > 0:
+            gray = cv2.cvtColor(face_crop, cv2.COLOR_BGR2GRAY)
+            sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
+            sharpness_score = min(sharpness / 200.0, 1.0)
+
+        det_score = float(face.det_score)
+        return 0.40 * size_score + 0.35 * sharpness_score + 0.25 * det_score
+
+    @torch.no_grad()
+    def _extract_quality_weighted(
+        self,
+        face_images: list[Image.Image],
+        bypass_pre_crop: bool = False,
+    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """Quality-weighted mean 集約 (Phase A · burstiness 緩和)
+
+        1. 各画像の ID embedding を抽出
+        2. InsightFace ベースの品質スコアを計算
+        3. softmax(quality / temperature) で重み付き平均
+        4. ノルム復元 (v6 SOUL SYNERGY)
+        """
+        import math
+
+        logger.info(f"🎭 [PuLIDExtractor] {len(face_images)} 枚から Quality-Weighted Mean 集約開始")
+
+        scored: list[dict] = []
+        for i, img in enumerate(face_images):
+            _id, _u = self._extract_single(img, bypass_pre_crop=bypass_pre_crop)
+            if _id is None:
+                logger.warning(f"  ⚠️ [{i+1}/{len(face_images)}] 抽出失敗 · スキップ")
+                continue
+            quality = self._compute_quality_score(img)
+            scored.append({"id": _id, "uncond": _u, "quality": quality})
+            logger.info(f"  [{i+1}/{len(face_images)}] quality={quality:.3f}")
+
+        if not scored:
+            logger.error("❌ [PuLIDExtractor] 有効な参照画像が 0 枚 · 集約不可")
+            raise RuntimeError("有効な参照画像が 0 枚 (quality-weighted 集約)")
+
+        if len(scored) == 1:
+            return scored[0]["id"], scored[0]["uncond"]
+
+        qualities = [s["quality"] for s in scored]
+        temperature = 0.5
+        exp_q = [math.exp(q / temperature) for q in qualities]
+        total_exp = sum(exp_q)
+        weights = [e / total_exp for e in exp_q]
+
+        final_id = torch.zeros_like(scored[0]["id"])
+        for w, s in zip(weights, scored):
+            final_id += w * s["id"]
+
+        stacked_id = torch.stack([s["id"] for s in scored], dim=0)
+        id_norms = torch.norm(stacked_id, p=2, dim=-1, keepdim=True)
+        mean_id_norm = torch.mean(id_norms, dim=0)
+        current_id_norm = torch.norm(final_id, p=2, dim=-1, keepdim=True) + 1e-6
+        final_id = (final_id / current_id_norm) * mean_id_norm
+
+        uncond_list = [s["uncond"] for s in scored if s["uncond"] is not None]
+        final_uncond = None
+        if uncond_list:
+            final_uncond = torch.zeros_like(uncond_list[0])
+            for w, u in zip(weights, uncond_list):
+                final_uncond += w * u
+            stacked_u = torch.stack(uncond_list, dim=0)
+            u_norms = torch.norm(stacked_u, p=2, dim=-1, keepdim=True)
+            mean_u_norm = torch.mean(u_norms, dim=0)
+            current_u_norm = torch.norm(final_uncond, p=2, dim=-1, keepdim=True) + 1e-6
+            final_uncond = (final_uncond / current_u_norm) * mean_u_norm
+
+        logger.info(
+            f"🏆 [PuLIDExtractor] Quality-Weighted Mean 集約完了: "
+            f"{len(scored)} 枚 (weights={[f'{w:.2f}' for w in weights]})"
+        )
+        return final_id.to(dtype=self.dtype), final_uncond.to(dtype=self.dtype) if final_uncond is not None else None
+
+    # ─── 複数画像合成 (Norm-Preserved Mean · v6 SOUL SYNERGY · 後方互換) ───
 
     @torch.no_grad()
     def extract_multi(
@@ -249,14 +383,14 @@ class PuLIDExtractor:
             return None, None
 
         if len(valid) == 1:
-            return self.extract(valid[0], bypass_pre_crop=bypass_pre_crop)
+            return self._extract_single(valid[0], bypass_pre_crop=bypass_pre_crop)
 
         logger.info(f"🎭 [PuLIDExtractor] {len(valid)} 枚から Norm-Preserved Mean 合成開始")
 
         id_list, uncond_list = [], []
         for i, img in enumerate(valid):
             try:
-                _id, _u = self.extract(img, bypass_pre_crop=bypass_pre_crop)
+                _id, _u = self._extract_single(img, bypass_pre_crop=bypass_pre_crop)
                 if _id is not None:
                     id_list.append(_id)
                 if _u is not None:
@@ -1327,15 +1461,18 @@ class IdentityEngine:
         """
         prepared: dict = {}
 
-        if identity_config.reference_image is None:
+        ref_images = identity_config.get_reference_images()
+        if not ref_images:
             return prepared
+        primary_ref = ref_images[0]
 
         # ─── PuLID ──
-        # v7.2 Nunchaku 経路では PuLIDFluxPipeline が id_image を直接受け取るため、
-        # 抽出した embedding に加えて元画像も保存しておく
+        # multi-ref: quality-weighted mean 集約 (Phase A)
+        # single-ref: 従来動作 (後方互換)
         if self.pulid_extractor:
+            extract_input = ref_images if len(ref_images) > 1 else primary_ref
             id_emb, uncond_emb = self.pulid_extractor.extract(
-                identity_config.reference_image,
+                extract_input,
                 bypass_pre_crop=False,
             )
             if id_emb is not None:
@@ -1346,17 +1483,14 @@ class IdentityEngine:
                 prepared["pulid_sigma_start"] = identity_config.pulid_sigma_start
                 prepared["pulid_sigma_end"]   = identity_config.pulid_sigma_end
                 prepared["pulid_double_interval"] = identity_config.pulid_double_interval
-                # PuLIDFluxPipeline の id_image= に直接渡せるように元画像を保持
-                prepared["reference_image"] = identity_config.reference_image
+                prepared["reference_image"] = primary_ref
 
         # ─── IP-Adapter Plus Face (Stage 4-D-2 真実装 · 2026-05-05) ──
-        # encode_face で事前エンコード → joint_attention_kwargs 経由で C++ カーネルに注入
-        # 設計: Hit & Run 戦略 (CLIP-L 独立保持 · pipeline に attach しない)
         if self.ip_adapter and self.ip_adapter.is_loaded:
-            ip_embeds = self.ip_adapter.encode_face(identity_config.reference_image)
+            ip_embeds = self.ip_adapter.encode_face(primary_ref)
             if ip_embeds is not None:
-                prepared["ip_image_embeds"] = ip_embeds  # ★ Stage 4-D-2: 事前エンコード済 tensor
-                prepared["ip_image"]        = identity_config.reference_image  # 後方互換
+                prepared["ip_image_embeds"] = ip_embeds
+                prepared["ip_image"]        = primary_ref
                 prepared["ip_weight"]       = identity_config.ip_adapter_weight
                 logger.info(
                     f"  🚀 [Stage 4-D-2] IP-Adapter encode_face 完了 "
@@ -1364,27 +1498,24 @@ class IdentityEngine:
                 )
             else:
                 logger.warning("⚠️ [Stage 4-D-2] encode_face が None · IP-Adapter スキップ")
-                prepared["ip_image"]  = identity_config.reference_image
+                prepared["ip_image"]  = primary_ref
                 prepared["ip_weight"] = identity_config.ip_adapter_weight
         elif self.ip_adapter:
-            # IP-Adapter インスタンスはあるが未ロード (lazy_init 未実行) → 後方互換
-            prepared["ip_image"]  = identity_config.reference_image
+            prepared["ip_image"]  = primary_ref
             prepared["ip_weight"] = identity_config.ip_adapter_weight
 
         # ─── ControlNet ──
         if self.controlnet:
             prepared["controlnet_image"]  = self.controlnet.preprocess(
-                identity_config.reference_image,
+                primary_ref,
                 identity_config.controlnet_type,
             )
             prepared["controlnet_type"]   = identity_config.controlnet_type
             prepared["controlnet_weight"] = identity_config.controlnet_weight
 
         # ─── ★ Patch C Stage 3c NEW: Pose 抽出 (アプローチ X) ──
-        # 設計参照: docs/Patch_C_Stage_3_Implementation_Design_v2.md セクション 9.1
-        # 優先順位: pose_reference_image > reference_image
         if identity_config.enable_multi_cn and identity_config.cn_use_pose:
-            pose_source = identity_config.pose_reference_image or identity_config.reference_image
+            pose_source = identity_config.pose_reference_image or primary_ref
 
             if pose_source is not None:
                 if self.pose_extractor is None:
@@ -1432,7 +1563,7 @@ class IdentityEngine:
             depth_source = (
                 identity_config.depth_reference_image
                 or identity_config.pose_reference_image
-                or identity_config.reference_image
+                or primary_ref
             )
 
             if depth_source is not None:
