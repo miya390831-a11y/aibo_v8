@@ -1,0 +1,26 @@
+{
+  "_comment": "この内容を .claude/settings.json にマージする。既に settings.json があれば hooks キーだけ追記。パスは環境に合わせて絶対パス推奨。",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .errorfix/guard_forbidden.py"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -c \"import glob; n=len(glob.glob('logs/errorfix_inbox/*.md')); print(f'[errorfix] 司令部レビュー待ちの報告: {n} 件 (logs/errorfix_inbox/ を司令部に持ち込んでレビュー)') if n else None\""
+          }
+        ]
+      }
+    ]
+  }
+}
