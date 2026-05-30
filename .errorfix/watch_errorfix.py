@@ -45,9 +45,12 @@ WORK_DIR    = REPO_ROOT / ".errorfix"
 POLL_SEC    = 4.0                                # ポーリング間隔(Drive 同期を考慮)
 DEBOUNCE_SEC = 30.0                              # 同一署名の再発火を抑える窓
 MAX_RETRIES = 3                                  # 同一署名がこの回数でエスカレーション
-CLAUDE_BIN  = os.environ.get("CLAUDE_BIN", "claude")
+CLAUDE_BIN  = os.environ.get("CLAUDE_BIN", r"C:\Users\yuuki\AppData\Roaming\npm\claude.cmd")
 AUTO_PUSH   = False                              # 既知パターン自動対応時に push まで行うか(既定: ローカルcommitのみ)
 BRANCHES    = ["master", "colab-stable"]
+# 起動時に既存ログを全走査するか。既定 False = 既存ファイルは「既読」扱いにし、起動後に
+# 追記された分・新規作成ファイルだけを拾う(過去バックログの再診断・連続起動を防ぐ)。
+SCAN_BACKLOG_ON_START = os.environ.get("SCAN_BACKLOG_ON_START", "0") == "1"
 
 # ★ ドクトリン B: 司令部が「自動対応してよい」と認めた既知パターン(常設指示)。
 #   これに当たるエラーだけ統括が自動で直して報告。新規/リスクありは司令部レビューへ。
@@ -269,13 +272,31 @@ def auto_apply(report_path: Path, report_id: str):
     return True, msg
 
 
-def scan_once(state):
+def _log_files():
+    """監視対象ファイル一覧(inbox は除外)。scan_once と seed_offsets で共用。"""
     files = sorted(glob.glob(str(LOG_DIR / "**" / "*.log"), recursive=True)) + \
             sorted(glob.glob(str(LOG_DIR / "**" / "*.txt"), recursive=True)) + \
             sorted(glob.glob(str(LOG_DIR / "report_*.md"), recursive=True))
-    for f in files:
-        if str(INBOX_DIR) in f:
+    return [f for f in files if str(INBOX_DIR) not in f]
+
+
+def seed_offsets(state):
+    """起動時、既存ログを『既読』として現在サイズを offsets に記録する。
+    以降は起動後に追記された分・新規ファイルだけを拾う(過去バックログの再診断を防ぐ)。"""
+    n = 0
+    for f in _log_files():
+        if f in state["offsets"]:
             continue
+        try:
+            state["offsets"][f] = os.path.getsize(f)
+            n += 1
+        except OSError:
+            continue
+    return n
+
+
+def scan_once(state):
+    for f in _log_files():
         try:
             size = os.path.getsize(f)
         except OSError:
@@ -364,7 +385,15 @@ def main():
     print(f"[watch] 起動: REPO={REPO_ROOT} LOG_DIR={LOG_DIR}")
     print(f"[watch] poll={POLL_SEC}s debounce={DEBOUNCE_SEC}s max_retries={MAX_RETRIES}")
     release_lock()  # 異常終了の残骸を掃除
+    fresh_start = not STATE_PATH.exists()
     state = load_state()
+    if fresh_start and not SCAN_BACKLOG_ON_START:
+        seeded = seed_offsets(state)
+        save_state(state)
+        print(f"[watch] 初回起動: 既存ログ {seeded} 件を既読扱い(過去バックログは診断しない)。"
+              f" 全走査するなら SCAN_BACKLOG_ON_START=1。")
+    elif fresh_start:
+        print("[watch] 初回起動: SCAN_BACKLOG_ON_START=1 のため既存ログも走査する。")
     try:
         while True:
             scan_once(state)

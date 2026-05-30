@@ -1,0 +1,60 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "AIBO: チーム一括起動",
+      "dependsOn": ["統括くろうど", "特殊部隊くろうど", "エラー修正ウォッチャー"],
+      "group": { "kind": "build", "isDefault": true },
+      "runOptions": { "runOn": "folderOpen" },
+      "problemMatcher": []
+    },
+    {
+      "label": "統括くろうど",
+      "type": "process",
+      "command": "powershell",
+      "args": [
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+        "$cc = (Get-Command claude.cmd -ErrorAction SilentlyContinue).Source; if (-not $cc) { $cc = 'C:\\Users\\yuuki\\AppData\\Roaming\\npm\\claude.cmd' }; $c = Get-Content -Raw -Encoding UTF8 '.claude/agents/lead-verify-kuroudo.md'; & $cc --append-system-prompt $c --permission-mode acceptEdits '君は実装検証統括くろうど。司令部からの指示書を待つ役。まず repo の現状を把握して待機。'"
+      ],
+      "isBackground": true,
+      "presentation": {
+        "group": "aibo-team",
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": false
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "特殊部隊くろうど",
+      "type": "process",
+      "command": "powershell",
+      "args": [
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+        "$cc = (Get-Command claude.cmd -ErrorAction SilentlyContinue).Source; if (-not $cc) { $cc = 'C:\\Users\\yuuki\\AppData\\Roaming\\npm\\claude.cmd' }; $c = Get-Content -Raw -Encoding UTF8 '.claude/charters/dynamic-kuroudo.md'; & $cc --append-system-prompt $c --dangerously-skip-permissions '君はダイナミックくろうど(特殊部隊)。司令部からの偵察ミッションを待つ。重い任務時は /effort ultracode を入れる。まず repo 現状を把握して待機。'"
+      ],
+      "isBackground": true,
+      "presentation": {
+        "group": "aibo-team",
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": false
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "エラー修正ウォッチャー",
+      "type": "shell",
+      "command": "python",
+      "args": [".errorfix/watch_errorfix.py"],
+      "isBackground": true,
+      "presentation": {
+        "group": "aibo-team",
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": false
+      },
+      "problemMatcher": []
+    }
+  ]
+}
