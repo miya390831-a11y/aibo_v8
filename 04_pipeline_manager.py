@@ -43,7 +43,9 @@ Version: v7.2
 from __future__ import annotations
 
 import gc
+import json
 import os
+import struct
 from importlib import import_module
 from pathlib import Path
 from types import MethodType
@@ -100,6 +102,86 @@ class _DummyEncoderHidProj:
 # ============================================================================
 # ⚒️ Section 4.0 · ヘルパ
 # ============================================================================
+
+# ============================================================================
+# 🛡️ C0 · safetensors ロード前検証ゲート (RECON-002 / IMPL-001)
+#   Drive FUSE 越しの巨大 safetensors 途中切れ → 素 Flux 縮退(外国人化)を
+#   ロード前に loud に fail-fast させる。header だけ読む軽量検証。
+# ============================================================================
+
+class C0VerificationError(RuntimeError):
+    """C0 検証で safetensors の破損を検知した時に投げる。
+    既存の degrade-except に飲まれず fail-fast させるための専用型。"""
+
+
+def verify_safetensors(path) -> tuple[bool, str]:
+    """safetensors を header だけ読んで完全性を検証する(全体は読まない)。
+    戻り値 (ok, reason)。"""
+    size = os.path.getsize(path)
+    if size < 8:
+        return (False, "smaller-than-header")
+    with open(path, "rb") as f:
+        N = struct.unpack("<Q", f.read(8))[0]          # header 長 (LE u64)
+        if 8 + N > size:
+            return (False, "header-truncated")
+        head = f.read(N)
+        if head[:1] != b"{":
+            return (False, "not-json-header")
+        meta = json.loads(head)
+        max_end = max(v["data_offsets"][1]
+                      for k, v in meta.items() if k != "__metadata__")
+    expected = 8 + N + max_end
+    if expected != size:
+        return (False, f"not-fully-covered expected={expected} actual={size}")
+    return (True, "ok")
+
+
+def _c0_verify_file(name: str, path) -> None:
+    """具体的なローカルパスに対し C0 検証。FAIL なら error ログ + raise。"""
+    if not path or not os.path.exists(path):
+        logger.warning(f"[C0] SKIP {name}: path unresolved/absent path={path}")
+        return
+    ok, reason = verify_safetensors(path)
+    if ok:
+        logger.info(f"[C0] OK {name} {path}")
+        return
+    logger.error(f"[C0] FAIL {name} safetensors: {reason} path={path}")
+    raise C0VerificationError(f"[C0] {name}: {reason} path={path}")
+
+
+def _c0_verify_hf_single(name: str, repo_id: str, filename: str) -> None:
+    """HF cache 上の単一ファイルの実体パスを解決して C0 検証(DL はしない)。
+    cache に無ければ warn でスキップ(握りつぶさない)。"""
+    try:
+        from huggingface_hub import try_to_load_from_cache
+        path = try_to_load_from_cache(repo_id=repo_id, filename=filename)
+    except Exception as e:
+        logger.warning(f"[C0] SKIP {name}: cache 解決失敗 repo={repo_id} file={filename} ({e})")
+        return
+    if not isinstance(path, str):
+        logger.warning(f"[C0] SKIP {name}: HF cache 未在 repo={repo_id} file={filename}")
+        return
+    _c0_verify_file(name, path)
+
+
+def _c0_verify_hf_repo(name: str, repo_id: str) -> None:
+    """repo 内の cache 済み *.safetensors を列挙して各々 C0 検証(best-effort)。
+    snapshot を解決できなければ warn でスキップ(握りつぶさない)。"""
+    try:
+        from huggingface_hub import snapshot_download
+        snap = snapshot_download(repo_id=repo_id,
+                                 allow_patterns=["*.safetensors"],
+                                 local_files_only=True)
+    except Exception as e:
+        logger.warning(f"[C0] SKIP {name}: snapshot 未解決 repo={repo_id} ({e})")
+        return
+    files = sorted(Path(snap).rglob("*.safetensors"))
+    if not files:
+        logger.warning(f"[C0] SKIP {name}: cache 済み safetensors 無し repo={repo_id}")
+        return
+    for fp in files:
+        _c0_verify_file(f"{name}:{fp.name}", str(fp))
+
 
 def _flush_vram():
     """VRAM クリーンアップ"""
@@ -277,6 +359,7 @@ class FluxA100PipelineManager:
         flux_model_id = f"{self.sys_cfg.nunchaku_repo}/{flux_filename}"
 
         logger.info(f"  📥 [1/4] Nunchaku Transformer ロード: {flux_filename}")
+        _c0_verify_hf_single("transformer", self.sys_cfg.nunchaku_repo, flux_filename)
         try:
             self._shared_transformer = NunchakuFluxTransformer2dModel.from_pretrained(
                 flux_model_id,
@@ -339,6 +422,7 @@ class FluxA100PipelineManager:
         skip_pipe_base_to_cuda = False  # enable_model_cpu_offload 成功時のみ True (④ と整合)
         _flush_vram()
         logger.info(f"  🧹 [VRAM] PuLIDFluxPipeline 構築前のクリーンアップ完了 (使用中: {_vram_used_gb():.1f} GB)")
+        _c0_verify_hf_repo("base", self.sys_cfg.base_model_repo)
 
         if self.sys_cfg.enable_pulid:
             try:
@@ -413,6 +497,7 @@ class FluxA100PipelineManager:
                     transformer=self._shared_transformer,
                     torch_dtype=self.dtype,
                 )
+                logger.warning("[OBS-A] enable_pulid=True だが PuLIDFluxPipeline 構築失敗 -> 素 FluxPipeline に縮退した")
         else:
             logger.info("  🚀 [3/5] FluxPipeline 構築 (PuLID 無効)")
             self.pipe_base = FluxPipeline.from_pretrained(
@@ -433,6 +518,7 @@ class FluxA100PipelineManager:
                 logger.info(f"  ℹ️ pipe_base.to(cuda) スキップ: {e}")
 
         self._shared_vae = self.pipe_base.vae
+        logger.info(f"[OBS-A] pipe_base class = {type(self.pipe_base).__name__} / enable_pulid={self.sys_cfg.enable_pulid}")
 
         # ─── 4. FBCache 封印 (PuLID×CN 衝突防止) ───
         self._seal_fbcache()
@@ -473,6 +559,7 @@ class FluxA100PipelineManager:
         # ─── 1. Shakker Union Pro 2.0 を BF16 でロード ──────────
         cn_repo = "Shakker-Labs/FLUX.1-dev-ControlNet-Union-Pro-2.0"
         logger.info(f"🎛️ [Stage 3b] ControlNet Union Pro 2.0 ロード: {cn_repo}")
+        _c0_verify_hf_repo("controlnet", cn_repo)
 
         self.controlnet_model = FluxControlNetModel.from_pretrained(
             cn_repo,
@@ -1006,6 +1093,7 @@ class FluxA100PipelineManager:
                 repo_id=self.sys_cfg.hyper_flux_repo,
                 filename=self.sys_cfg.hyper_flux_filename,
             )
+            _c0_verify_file("hyper_flux", hyper_path)
             self._shared_transformer.update_lora_params(hyper_path)
 
             # Hyper-FLUX の strength を確実に適用 (ACE++ 撤去後の最終値)
@@ -1015,6 +1103,8 @@ class FluxA100PipelineManager:
             self._shared_transformer.set_lora_strength(hyper_strength)
             self._hyper_flux_loaded = True
             logger.info(f"✅ Hyper-FLUX loaded · strength={hyper_strength}")
+        except C0VerificationError:
+            raise
         except Exception as e:
             logger.warning(f"  ⚠️ Hyper-FLUX 注入失敗: {e}")
             logger.warning("     → LoRA なしで続行 · 28 steps 相当に降格")
@@ -1182,6 +1272,7 @@ class FluxA100PipelineManager:
             "pipe_fill": self.pipe_fill is not None,
             "pipe_prior": self.pipe_prior is not None,
             "hyper_flux_loaded": self._hyper_flux_loaded,
+            "pipe_base_class": type(self.pipe_base).__name__ if self.pipe_base is not None else None,
             "vram_used_gb": _vram_used_gb(),
         }
 
