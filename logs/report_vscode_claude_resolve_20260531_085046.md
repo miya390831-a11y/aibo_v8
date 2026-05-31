@@ -64,4 +64,43 @@ claude は `C:\Users\yuuki\AppData\Roaming\npm\` に3種が同居：
 
 ## 6. 厳守ルール適合
 - Setting A の7値・PuLID・量子化核は未接触。例外の握り潰し(silent fail)追加なし。
-- 編集は指示された2ファイルのみ。push 未実施。
+- 編集は指示された2ファイルのみ。
+
+---
+
+## 続報 (08:55) — 項目5 適用 + 同期/ push 結果
+
+### 項目5(過去ログ連続診断)を適用
+- `watch_errorfix.py`: 初回起動(state.json 無し)で既存ログを既読シードする
+  `seed_offsets()` + `SCAN_BACKLOG_ON_START`(既定 False)を追加。`_log_files()` に
+  走査ロジックを共通化。
+- 検証: py_compile OK。実走で既存ログ 18 件をシード → seed 後の scan_once は
+  **診断を1件も発火しない**ことを確認。`SCAN_BACKLOG_ON_START` 既定 False。
+
+### git
+- commit `e82937b` を作成(対象3ファイルのみ: tasks.json / watch_errorfix.py / 本報告)。
+- **master へ push 完了**(`c0a22eb..e82937b`)。
+- **colab-stable へは push できず(報告して停止)**:
+  - colab-stable は HEAD と履歴分岐(向こうに 34 コミット、HEAD 側に 2)。
+  - さらに **チーム足場(594fa06)ごと colab-stable に存在せず**、`.errorfix/watch_errorfix.py`
+    も `.vscode/tasks.json` も colab-stable に無い。
+  - e82937b は watch_errorfix.py の「修正差分」なので、ベースファイルが無い colab-stable
+    では cherry-pick が必ず競合 → 指示どおり停止(remote 無変更、working tree も無変更)。
+  - **要・司令部判断**: colab-stable にチーム運用ツールを載せるなら「差分」ではなく
+    **足場一式(.errorfix/.vscode + watch_errorfix.py 等)を新規ファイルとして追加**する形が必要。
+    そもそも colab-stable は Colab デプロイ用で PC 運用ツールは不要、という整理も可。
+
+### 4拠点同期(承認: 3拠点に新規作成して配布)
+- 他3拠点には元々 `.errorfix/` `.vscode/` が無かった(チーム足場が PC 主拠点のみだった)。
+- 3拠点に両ディレクトリを新規作成し、`watch_errorfix.py` と `tasks.json` をコピー。
+- **全6コピー MD5 一致を確認**(G:\マイドライブ の Drive FUSE 含めドリフト無し)。
+  - src watch=32640b5e... tasks=51473187...
+
+### Colab 反映について
+- 今回の変更は **PC ローカルの運用ツール(VS Code タスク / 当直ウォッチャー)** であり、
+  Colab のパイプライン実行コードではない。**Colab 側の再 run は不要**。
+
+### 残課題・要・司令部判断
+- colab-stable への足場反映可否(上記)。
+- 起動時バックログ抑制のトレードオフ: ウォッチャー停止中に**既存ファイルへ追記**された
+  新規エラーは見逃す(新規ファイルは拾える)。許容でよいか、mtime 併用するか。
