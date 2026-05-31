@@ -45,3 +45,4 @@ logs/errors/*.md
 .errorfix/state.json
 .errorfix/*.patch
 logs/errorfix_inbox/
+.env
