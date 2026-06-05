@@ -99,6 +99,10 @@ class PuLIDExtractor:
         self.dummy_transformer = None
         self._initialized = False
         self._last_init_error: Optional[str] = None
+        # IMPL-005 (RECON-006c 案1): 観測属性を __init__ で初期化。
+        # 実行時にしか作られないと未定義参照や前回痕跡残りで観測が汚染されるため。
+        self._last_extract_error: Optional[str] = None
+        self._last_face_count: Optional[int] = None
         self._init_fail_time: Optional[float] = None
         self._INIT_RETRY_COOLDOWN = 30  # seconds
 
@@ -258,8 +262,13 @@ class PuLIDExtractor:
                 cal_uncond=True,
             )
 
-            shape_str = tuple(id_embeds.shape) if hasattr(id_embeds, "shape") else "?"
-            logger.info(f"✅ [PuLIDExtractor] ID embedding 抽出完了: shape={shape_str}")
+            # RECON-005 FIX-3: None を「✅ 抽出完了 shape=?」と誤報せず正直に警告。
+            # 失敗理由を _last_extract_error に残し OBS サマリ(IMPL-004)へ伝える。
+            if id_embeds is None:
+                self._last_extract_error = "get_id_embedding が None (顔未検出の可能性)"
+                logger.warning(f"⚠️ [PuLIDExtractor] {self._last_extract_error}")
+            else:
+                logger.info(f"✅ [PuLIDExtractor] ID embedding 抽出完了: shape={tuple(id_embeds.shape)}")
             return id_embeds, uncond_embeds
 
         except Exception as e1:
@@ -278,8 +287,12 @@ class PuLIDExtractor:
                         cal_uncond=True,
                     )
 
-                    shape_str = tuple(id_embeds.shape) if hasattr(id_embeds, "shape") else "?"
-                    logger.info(f"✅ [PuLIDExtractor] リサイズ後リトライ成功: shape={shape_str}")
+                    # RECON-005 FIX-3 (retry path): None を成功と誤報しない
+                    if id_embeds is None:
+                        self._last_extract_error = "get_id_embedding が None (リサイズ後も顔未検出の可能性)"
+                        logger.warning(f"⚠️ [PuLIDExtractor] {self._last_extract_error}")
+                    else:
+                        logger.info(f"✅ [PuLIDExtractor] リサイズ後リトライ成功: shape={tuple(id_embeds.shape)}")
                     return id_embeds, uncond_embeds
 
                 except Exception as e2:
@@ -307,6 +320,7 @@ class PuLIDExtractor:
 
         try:
             faces = face_app.get(img_bgr)
+            self._last_face_count = len(faces) if faces else 0
         except Exception as e:
             logger.warning(f"⚠️ [QualityScore] InsightFace 検出失敗: {e}")
             return 0.3
@@ -1660,7 +1674,8 @@ class IdentityEngine:
         if self.strategy.is_nunchaku() and self.nunchaku_binder:
             # ─── Nunchaku 経路 (PuLIDFluxPipeline / FluxPipeline 共通) ──
             transformer = pipe_base.transformer
-            self.nunchaku_binder.bind_forward(transformer)
+            _obs_bind_ok = self.nunchaku_binder.bind_forward(transformer)
+            logger.info(f"[OBS-C] bind_forward returned = {_obs_bind_ok}")
             self.nunchaku_binder.install_chrono_singularity_wrapper(transformer)
 
             inject_result = self.nunchaku_binder.inject(
