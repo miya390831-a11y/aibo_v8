@@ -3,7 +3,7 @@
 import { useCallback, useState } from "react"
 import { X, Check, ZoomIn } from "lucide-react"
 import Cropper from "react-easy-crop"
-import { cropAndResize, loadImageFromUrl } from "@/lib/image-utils"
+import { cropAndResize, loadImageFromUrl, expandCropWithContext } from "@/lib/image-utils"
 
 type AreaPixels = { x: number; y: number; width: number; height: number }
 
@@ -34,7 +34,15 @@ export function CropDialog({
     setBusy(true)
     try {
       const img = await loadImageFromUrl(imageSrc)
-      const out = cropAndResize(img, croppedAreaPixels, outputSize, 0.92)
+      // IMPL-008(案b): 確定枠を中心拡張して元画像の実コンテキスト(髪/首/肩)を取り込み、
+      // 顔ドアップ → facexlib align fail → PuLID 無注入 を根治。factor=2.5(実機確定値)。
+      const expanded = expandCropWithContext(
+        croppedAreaPixels,
+        img.naturalWidth,
+        img.naturalHeight,
+        2.5,
+      )
+      const out = cropAndResize(img, expanded, outputSize, 0.92)
       onConfirm(out)
     } catch (err) {
       console.error("[CropDialog] crop failed:", err)
