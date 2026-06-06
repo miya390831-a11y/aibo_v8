@@ -64,6 +64,10 @@ FluxA100PipelineManager = _pm_mod.FluxA100PipelineManager
 AssetManager            = _pm_mod.AssetManager
 _flush_vram             = _pm_mod._flush_vram
 
+# ─── a3_controller (A3 Week1 · RECON-010/011/012 · 既定 OFF) ───
+_a3_mod = import_module("a3_controller")
+A3Controller = _a3_mod.A3Controller
+
 
 # ============================================================================
 # 🎯 Section 5.1 · Phase0Sniper (YOLO 顔タイトクロップ)
@@ -779,6 +783,47 @@ class CharacterOrchestrator:
 
             logger.info(f"🚀 [Pass 1] generate (steps={steps}, seed={seed})")
 
+            # ─── A3 per-gen reset(RECON-010/011/012 · 既定 OFF · P4 持ち越し禁止) ───
+            # 生成ごとに必ず実行し、直前生成の ON 残留を必ず False に戻す。
+            # OFF 時は _a3_enabled=False をセットする以外、A3 attribute に触れない
+            #   → forward は getattr(_a3_enabled, False)→False で完全透過(退行ゼロ)。
+            _a3_tf = self.pm._shared_transformer
+            # 判定式は不変。位置だけ if の外へ出し、_a3_on を常に定義する(tf=None でも下流参照が安全)。
+            _a3_on = bool(
+                (self.sys_cfg.enable_a3
+                 or os.environ.get("AIBO_ENABLE_A3", "0") == "1")
+                and ("id_embeds" in identity_data)
+            )
+            # ─── [GATE] 起動ゲート診断ログ(RECON-013 案A · ログのみ・判定式は変えない)──
+            # _a3_on=False の理由(env か id_embeds か 経路か)を一発特定する。必ず1行出す。
+            # prefix は [A3] と非衝突(M-check の [A3] カウンタに拾われない)。
+            logger.info(
+                f"[GATE] route=PORTRAIT "
+                f"env={os.environ.get('AIBO_ENABLE_A3')!r} "          # 実読値(None/'0'/'1')
+                f"enable_a3={self.sys_cfg.enable_a3} "
+                f"id_embeds={'id_embeds' in identity_data} "
+                f"_a3_on={_a3_on} "
+                f"tf={'set' if _a3_tf is not None else 'None'}"
+            )
+            if _a3_tf is not None:
+                object.__setattr__(_a3_tf, "_a3_enabled", _a3_on)  # 直前 ON の残留を必ずクリア
+                if _a3_on:
+                    if not hasattr(_a3_tf, "_a3_ctrl"):
+                        object.__setattr__(_a3_tf, "_a3_ctrl", A3Controller())  # 1 度だけ生成
+                    _a3_w0 = getattr(_a3_tf, "_pulid_weight", 1.0)              # 単一ソース(03:1711)
+                    _a3_w0_id = identity_data.get("pulid_weight", _a3_w0)
+                    assert abs(_a3_w0 - _a3_w0_id) < 1e-6, \
+                        f"[A3] w0 source mismatch: tf._pulid_weight={_a3_w0} vs identity_data={_a3_w0_id}"
+                    _a3_tf._a3_ctrl.reset(_a3_w0, w_bump=self.sys_cfg.a3_w_bump)
+                    object.__setattr__(_a3_tf, "_a3_prev_h", None)
+                    object.__setattr__(_a3_tf, "_a3_dyn_weight", _a3_w0)
+                    object.__setattr__(_a3_tf, "_a3_fwd_count", 0)
+                    logger.info(
+                        f"🧪 [A3] enabled (tier={self.sys_cfg.a3_tier}) w0={_a3_w0} "
+                        f"w_bump={self.sys_cfg.a3_w_bump} "
+                        f"env={os.environ.get('AIBO_ENABLE_A3', '0')}"
+                    )
+
             # 🥷 v7.2.1 Patch A.3: AIBO_FORCE_OFFLOAD=1 のときのみ GPU 復帰
             # 通常 (A100 40GB) は構築時から GPU 常駐なので何もしない
             if os.environ.get("AIBO_FORCE_OFFLOAD", "0") == "1":
@@ -789,6 +834,20 @@ class CharacterOrchestrator:
                         logger.info(f"  ℹ️ pulid_model GPU 復帰スキップ: {e}")
 
             output = self.pm.pipe_base(**kwargs)
+
+            # ─── A3 M0 自動判定(VERDICT を必ず1行・file log/セルに残す · RECON-010) ───
+            # A3 ON 時のみ。OFF(既定)は完全透過 = PORTRAIT 退行ゼロを維持。
+            # ログ用ヘルパなので、ここでの例外で生成本体を落とさない(理由は warning で残す)。
+            if _a3_on and getattr(_a3_tf, "_a3_ctrl", None) is not None:
+                try:
+                    _a3_sum = _a3_tf._a3_ctrl.m0_summary(expected_steps=steps)
+                    logger.info(
+                        f"[A3][M0] VERDICT pass={_a3_sum['pass']} "
+                        f"distinct_ts={_a3_sum['distinct_ts']} expected={steps} "
+                        f"all_unique={_a3_sum['all_unique']} steps={_a3_sum['steps']}"
+                    )
+                except Exception as _a3_e:
+                    logger.warning(f"[A3][M0] VERDICT 集計に失敗: {_a3_e}")
 
             # 🥷 v7.2.1 Patch A.3: AIBO_FORCE_OFFLOAD=1 のときのみ CPU 退避
             if os.environ.get("AIBO_FORCE_OFFLOAD", "0") == "1":
@@ -839,6 +898,24 @@ class CharacterOrchestrator:
             - 推論例外 → _run_pass1 にフォールバック
         """
         try:
+            # ─── A3 ガード: CN 経路は A3 非対象(Week2/v7.3 送り)───────
+            # PORTRAIT gen で立った _a3_enabled の残留を CN 経路に漏らさない。
+            # forward は False を見て完全透過する(CN ロジックは一切不変)。
+            _a3_tf_cn = self.pm._shared_transformer
+            # ─── [GATE] 診断ログ(RECON-013 案A · ログのみ)──
+            # この行が出たら「Multi-CN 経路を通った=A3 は明示 OFF」の確定証拠。
+            # PORTRAIT [GATE] 行が出ず此方が出るなら、原因は env でなく経路(誤って CN 経路)。
+            logger.info(
+                f"[GATE] route=Multi-CN "
+                f"env={os.environ.get('AIBO_ENABLE_A3')!r} "
+                f"enable_a3={self.sys_cfg.enable_a3} "
+                f"id_embeds={'id_embeds' in identity_data} "
+                f"_a3_on=False(CN 経路は A3 明示 OFF) "
+                f"tf={'set' if _a3_tf_cn is not None else 'None'}"
+            )
+            if _a3_tf_cn is not None:
+                object.__setattr__(_a3_tf_cn, "_a3_enabled", False)
+
             # ─── 1. ControlNet パイプライン構築確認 ───────────────
             if not self.pm._controlnet_loaded:
                 logger.info("🔧 [Pass 1 CN] ControlNet pipeline 初回構築...")

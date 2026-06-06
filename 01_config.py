@@ -575,6 +575,17 @@ class SystemConfig:
     enable_redux: bool = True
     enable_instantid: bool = False         # P2 候補
 
+    # ─── A3 動的 PuLID weight 制御(Week1 M0→M2 · 既定 OFF · RECON-010/011/012) ───
+    # enable_a3=False の間は forward 完全透過(退行ゼロ)。env AIBO_ENABLE_A3=1 でも ON 可。
+    enable_a3: bool = False
+    a3_measure_steps: list = field(default_factory=lambda: [4, 6])  # Tier0 観測 step(S4 で前倒し可否)
+    a3_tier: int = 0               # M2 は Tier0(ログのみ・補正なし)
+    a3_w_bump: float = 0.2         # M2 配管実証用の固定 bump(step>=4 で w0→w0+bump)
+    a3_kp: float = 0.0             # M4 PI 用・枠だけ
+    a3_ki: float = 0.0             # M4 PI 用・枠だけ
+    a3_w_max_delta: float = 0.5    # M4 weight 変化上限・枠だけ
+    a3_drift_target: float = 0.0   # M4 drift 目標・枠だけ
+
     # ─── LoRA Stack ───
     max_lora_count: int = 8
 

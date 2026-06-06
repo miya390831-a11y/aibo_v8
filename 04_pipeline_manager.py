@@ -813,8 +813,38 @@ class FluxA100PipelineManager:
                 - Nunchaku 公式 gating 機構を活用
                 - 自前 sigma 計算は廃止
             """
+            # ─── A3 動的 weight 制御(RECON-010/011/012 · 既定 OFF) ──────────
+            # OFF 門(P5・退行ゼロ): _a3_enabled が False の間は A3 のコードに
+            # 一切触れず現行どおり透過する(getattr→False で全 A3 文を skip)。
+            # ★ 新規ラッパは被せない。auto_pulid_forward 本体に挿入する。
+            if getattr(self_tf, "_a3_enabled", False):
+                _a3_h = kwargs.get("hidden_states", args[0] if args else None)
+                _a3_ts = kwargs.get("timestep")
+                _a3_step = self_tf._a3_ctrl.on_forward(_a3_ts)               # timestep キーで step 同定
+                self_tf._a3_ctrl.measure_tier0(
+                    getattr(self_tf, "_a3_prev_h", None), _a3_h
+                )                                                            # Tier0 ログのみ(補正なし)
+                object.__setattr__(self_tf, "_a3_prev_h", _a3_h)
+                object.__setattr__(
+                    self_tf, "_a3_dyn_weight", self_tf._a3_ctrl.update_fixed(_a3_step)
+                )                                                            # M2: 固定 bump
+                # M0 probe: forward 呼び出し数 / step / timestep キーを毎回ログ
+                _a3_n = getattr(self_tf, "_a3_fwd_count", 0) + 1
+                object.__setattr__(self_tf, "_a3_fwd_count", _a3_n)
+                logger.info(
+                    f"[A3][M0] fwd#{_a3_n} step={_a3_step} "
+                    f"ts={getattr(self_tf._a3_ctrl, '_last_ts', None)} "
+                    f"w={getattr(self_tf, '_a3_dyn_weight', None)}"
+                )
+
             # PORTRAIT 経路 (id_embeddings 既に渡されてる) → そのまま透過
             if "id_embeddings" in kwargs and kwargs["id_embeddings"] is not None:
+                # A3 ON のみ: PORTRAIT の id_weight を動的値で「置換」(加算しない)。
+                # OFF 残留の _a3_dyn_weight を漏らさないため _a3_enabled でも門を切る
+                # (M1 のバイト一致を担保 · OFF 経路は一切不変)。
+                if (getattr(self_tf, "_a3_enabled", False)
+                        and getattr(self_tf, "_a3_dyn_weight", None) is not None):
+                    kwargs["id_weight"] = self_tf._a3_dyn_weight
                 try:
                     return original_pulid_forward(*args, **kwargs)
                 except TypeError as _te:
