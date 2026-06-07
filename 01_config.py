@@ -94,7 +94,7 @@ FACE_MASK_MARGIN_RATIO: float = 0.20
 # 素朴な env グローバル False フリップは共有 VAE + 最大2048 で OOM(本番500)になるため使わない。
 # env AIBO_VAE_TILING の明示指定はこのガードに優先(明示 > 自動)。
 # 既定 False = 現状維持(後退ゼロ)。本番フリップは確認スイープ合格後に司令部が True にする。
-VAE_TILING_GUARD: bool = False
+VAE_TILING_GUARD: bool = True
 
 # ─── Phase 3 用プロンプト ───
 NEGATIVE_PROMPT_BASE: str = (
