@@ -1660,6 +1660,174 @@ class AssetManager:
 
 
 # ============================================================================
+# 🎬 立体感 A/B 一発ランナー · depth_ab_run(Step1.5 露出ノブで4条件→グリッド)
+#   set_vae_tiling(本モジュール)/ set_gfpgan_blend(08)を使い、本番 PORTRAIT パス
+#   (op0.6・8step・既定プロンプト/サイズ)で baseline/tiling_off/gfpgan_skip/both を
+#   同一 ref/seed で生成。A3 は OFF(env を設定しない)。終了時に既定(tiling True /
+#   blend 1.0)へ復帰=後退ゼロ。**判定はしない**(RECON-018: PO 目視が権威・cos 不使用)。
+# ============================================================================
+
+_DEPTH_AB_CONDS = [
+    # (name, vae_tiling, gfpgan_blend)
+    ("baseline",    True,  1.0),   # 現状
+    ("tiling_off",  False, 1.0),   # ← 本命
+    ("gfpgan_skip", True,  0.0),   # crop/paste-back 往復の軟化を消す
+    ("both",        False, 0.0),
+]
+
+_DEPTH_DEFAULT_PROMPT = "a portrait photo of a person, natural light, looking at camera"
+
+
+def _depth_find_orch(orch=None):
+    """起動済み orchestrator を取得(引数優先 → 09_fastapi_server.get_orchestrator())。"""
+    if orch is not None:
+        return orch, None
+    try:
+        srv = import_module("09_fastapi_server")
+        return srv.get_orchestrator(), None
+    except Exception as e:
+        return None, f"orchestrator 取得失敗: {e}(先に UI/サーバを起動して1枚生成しておく)"
+
+
+def _depth_resolve_ref(ref):
+    """ref を (PIL.Image RGB, ref_id) に正規化(パス str / PIL を受ける)。失敗は (None, 理由)。"""
+    if isinstance(ref, Image.Image):
+        return ref.convert("RGB"), "ref"
+    if isinstance(ref, str):
+        if not os.path.exists(ref):
+            return None, f"ref パスが無い: {ref}"
+        rid = os.path.splitext(os.path.basename(ref))[0]
+        return Image.open(ref).convert("RGB"), rid
+    return None, f"ref の型が非対応: {type(ref).__name__}(パス str か PIL.Image を渡す)"
+
+
+def _depth_grid(images, out_dir, ref_id, seed, *, show=True):
+    """4枚を 2x2 グリッド(name ラベル付き)で保存 + inline 表示。返り grid_png or None。"""
+    try:
+        import matplotlib.pyplot as plt
+        import numpy as np
+    except Exception as e:
+        logger.warning(f"[depth_ab] matplotlib/numpy 不在でグリッド省略: {e}")
+        return None
+    n = len(images)
+    cols = 2
+    rows = (n + cols - 1) // cols
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 5, rows * 6))
+    axes = np.atleast_1d(axes).reshape(-1)
+    for ax in axes:
+        ax.axis("off")
+    for i, (name, im) in enumerate(images):
+        ax = axes[i]
+        if im is not None:
+            ax.imshow(np.asarray(im))
+        else:
+            ax.text(0.5, 0.5, "(no image)", ha="center", va="center")
+        ax.set_title(name, fontsize=13)
+    # ラベルは ASCII(Colab に CJK フォントが無くても tofu 化しないように)
+    fig.suptitle(
+        f"depth A/B   ref={ref_id}  seed={seed}   (PO visual: depth vs identity; tiling_off = main)",
+        fontsize=12,
+    )
+    fig.tight_layout()
+    grid_png = os.path.join(out_dir, f"{ref_id}_s{seed}_GRID.png")
+    try:
+        fig.savefig(grid_png, dpi=110, bbox_inches="tight")
+    except Exception as e:
+        logger.warning(f"[depth_ab] グリッド保存失敗: {e}")
+        grid_png = None
+    if show:
+        try:
+            plt.show()
+        except Exception as e:
+            logger.debug(f"[depth_ab] inline 表示 skip(非 Colab 等): {e}")
+    plt.close(fig)
+    return grid_png
+
+
+def depth_ab_run(ref, seed=0, out_dir="/content/drive/MyDrive/aibo_v7/depth_ab",
+                 prompt=_DEPTH_DEFAULT_PROMPT, width=832, height=1216,
+                 orch=None, show=True):
+    """立体感 A/B 一発ランナー: 同一 ref/seed・本番 PORTRAIT で4条件を生成→保存→グリッド表示。
+
+    条件(name, vae_tiling, gfpgan_blend): baseline(T,1.0)/ tiling_off(F,1.0·本命)/
+    gfpgan_skip(T,0.0)/ both(F,0.0)。各条件で set_vae_tiling + set_gfpgan_blend を設定して
+    1枚生成(op0.6=IdentityConfig 既定・8step・既定プロンプト/サイズ=本番同等)。A3 は OFF。
+    終了時に既定(tiling True / blend 1.0)へ復帰=後退ゼロ。**判定はしない**(PO 目視が権威)。
+    返り: {ok, out_dir, ref_id, seed, results:[…], grid_png}。
+    """
+    fr = import_module("08_face_refiner")
+    set_blend = fr.set_gfpgan_blend
+
+    img, ref_id_or_err = _depth_resolve_ref(ref)
+    if img is None:
+        print(f"[depth_ab][STOP] {ref_id_or_err}")
+        return {"ok": False, "reason": ref_id_or_err}
+    ref_id = ref_id_or_err
+
+    orch, err = _depth_find_orch(orch)
+    if orch is None:
+        print(f"[depth_ab][STOP] {err}")
+        return {"ok": False, "reason": err}
+
+    cfg = import_module("01_config")
+    GenerationConfig = cfg.GenerationConfig
+    IdentityConfig = cfg.IdentityConfig
+    StudioMode = cfg.StudioMode
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    results = []
+    images = []
+    try:
+        for name, tiling, blend in _DEPTH_AB_CONDS:
+            set_vae_tiling(tiling)                # 本モジュール(live vae 即時反映)
+            set_blend(blend)                      # 08_face_refiner(次の生成から)
+            # op0.6: pulid_weight は IdentityConfig 既定(=0.6・OP-CHANGE-001)を使う=本番同等
+            gen_cfg = GenerationConfig(prompt=prompt, width=int(width), height=int(height),
+                                       seed=int(seed))
+            id_cfg = IdentityConfig(reference_image=img)
+            print(f"[depth_ab] {name}: vae_tiling={tiling} gfpgan_blend={blend} 生成中 …")
+            result = orch.generate(gen_cfg=gen_cfg, id_cfg=id_cfg,
+                                   mode=StudioMode.PORTRAIT, save=False)
+            fimg = getattr(result, "final_image", None)
+            # 条件が効いてる確証: 実 vae の tiling 状態 + pulid_degraded(縮退してないか)
+            vae = getattr(getattr(orch.pm, "pipe_base", None), "vae", None)
+            vae_on = getattr(vae, "use_tiling", None)
+            degraded = bool(getattr(result, "pulid_degraded", False))
+            pused = bool(getattr(result, "pulid_used", False))
+            gerr = getattr(result, "error", None)
+            png = None
+            if fimg is not None:
+                png = os.path.join(out_dir, f"{ref_id}_s{seed}_{name}.png")
+                try:
+                    fimg.convert("RGB").save(png)
+                except Exception as e:
+                    logger.warning(f"[depth_ab] PNG 保存失敗 {name}: {e}")
+                    png = None
+                images.append((name, fimg.convert("RGB")))
+            else:
+                images.append((name, None))
+            logger.info(f"[depth_ab][OBS] {name}: vae.use_tiling={vae_on} "
+                        f"pulid_used={pused} pulid_degraded={degraded} err={gerr} png={png}")
+            print(f"[depth_ab] {name}: 完了 vae.use_tiling={vae_on} "
+                  f"pulid_used={pused} pulid_degraded={'⚠️True' if degraded else 'False'}")
+            results.append({"name": name, "png": png, "vae_tiling": tiling,
+                            "gfpgan_blend": blend, "vae_use_tiling": vae_on,
+                            "pulid_used": pused, "pulid_degraded": degraded, "error": gerr})
+    finally:
+        # 既定へ復帰(後退ゼロ): tiling True / blend 1.0
+        set_vae_tiling(True)
+        set_blend(1.0)
+        print("[depth_ab] 既定へ復帰: vae_tiling=True / gfpgan_blend=1.0")
+
+    grid_png = _depth_grid(images, out_dir, ref_id, seed, show=show)
+    print(f"[depth_ab] 完了 → {out_dir}(4枚 + グリッド {grid_png})")
+    print("[depth_ab] PO 目視で「立体感 vs 似度」(tiling_off が本命)。判定は PO(cos 不使用)。")
+    return {"ok": True, "out_dir": out_dir, "ref_id": ref_id, "seed": seed,
+            "results": results, "grid_png": grid_png}
+
+
+# ============================================================================
 # 🔧 Section 4.6 · スタンドアロン動作確認
 # ============================================================================
 
