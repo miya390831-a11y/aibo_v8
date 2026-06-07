@@ -269,6 +269,7 @@ class GenerationResult:
     ip_adapter_weight: float = 0.0
     controlnet_weight: float = 0.0
     pulid_used: bool = False
+    pulid_degraded: bool = False   # 観測性(RECON-019): PuLID→素Flux 縮退の検出(挙動不変・ログ/フラグのみ)
     upscale_used: bool = False
     phase3_applied: bool = False
     phase3_bypass_triggered: bool = False
@@ -299,6 +300,7 @@ class GenerationResult:
             "ip_adapter_weight": self.ip_adapter_weight,
             "controlnet_weight": self.controlnet_weight,
             "pulid_used": self.pulid_used,
+            "pulid_degraded": self.pulid_degraded,
             "upscale_used": self.upscale_used,
             "phase3_applied": self.phase3_applied,
             "phase3_bypass_triggered": self.phase3_bypass_triggered,
@@ -670,8 +672,12 @@ class CharacterOrchestrator:
             # ─── 9. Phase 4: 後始末 ───
             try:
                 self.ie.detach_from_pipeline(self.pm.pipe_base)
-            except Exception:
-                pass
+            except Exception as _detach_err:
+                # RECON-019: 空ハンドラ(厳守違反)をやめ、何が落ちたかを観測可能に(挙動は不変)
+                logger.warning(
+                    f"⚠️ [Orchestrator] detach_from_pipeline 失敗(後始末・生成は完了済): "
+                    f"{type(_detach_err).__name__}: {_detach_err}"
+                )
             self._flush_vram()
 
             result.elapsed_total_sec = time.perf_counter() - t0_total
@@ -691,6 +697,12 @@ class CharacterOrchestrator:
         logger.info("─" * 60)
         logger.info("[OBS-SUMMARY] 生成時 自動観測サマリ")
         logger.info(f"  pipe_base_class : {_pipe_cls}")
+        # RECON-019: PuLID→素Flux 縮退(外国人化の再発口)を観測可能に(挙動は変えない)
+        result.pulid_degraded = bool(getattr(self.pm, "_pulid_degraded", False))
+        logger.info(
+            f"  pulid_degraded  : "
+            f"{'⚠️ True(素Flux縮退=外国人化の口)' if result.pulid_degraded else 'False'}"
+        )
         logger.info(
             f"  hyper_flux      : enable={self.sys_cfg.enable_hyper_flux}"
             f" / loaded={getattr(self.pm, '_hyper_flux_loaded', None)}"

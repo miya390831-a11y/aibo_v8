@@ -237,6 +237,55 @@ def _resolve_city96_gguf_filename(preferred: str, repo_files: set[str]) -> tuple
 # 🏛️ Section 4.1 · FluxA100PipelineManager
 # ============================================================================
 
+# ============================================================================
+# 🎚️ 立体感 Step1.5 · VAE tiling トグル(A/B 可能化・RECON-019)
+#   832×1216 でも tiling が発動するとタイル境界ブレンドで高周波が落ちる疑い。
+#   ここでは「tiling の on/off だけ」を env / setter で切替可能にする(他のデコード挙動は不変)。
+#   既定 True = 現状維持(後退ゼロ)。env AIBO_VAE_TILING で再起動なしスイープ可。
+# ============================================================================
+_VAE_TILING_ENV = "AIBO_VAE_TILING"
+_ACTIVE_PIPE_MANAGER = None   # set_vae_tiling が live vae を即時反映するための参照
+
+
+def _parse_bool_env(v):
+    if v is None:
+        return None
+    s = str(v).strip().lower()
+    if s in ("1", "true", "on", "yes", "y"):
+        return True
+    if s in ("0", "false", "off", "no", "n"):
+        return False
+    return None
+
+
+def get_vae_tiling() -> bool:
+    """現在の VAE tiling 既定(env 優先・未設定なら True=現状維持)。"""
+    b = _parse_bool_env(os.environ.get(_VAE_TILING_ENV))
+    return True if b is None else b
+
+
+def set_vae_tiling(enabled) -> bool:
+    """VAE tiling を on/off(env 設定 + live vae 即時反映・再起動なし A/B)。既定 True=現状維持。
+
+    A/B: set_vae_tiling(False) で次の生成から tiling 無効(タイル境界ブレンドの高周波落ちを消す)。
+    """
+    b = bool(enabled)
+    os.environ[_VAE_TILING_ENV] = "1" if b else "0"
+    applied = False
+    vae = getattr(getattr(_ACTIVE_PIPE_MANAGER, "pipe_base", None), "vae", None)
+    if vae is not None:
+        try:
+            vae.enable_tiling() if b else vae.disable_tiling()
+            applied = True
+        except Exception as e:                       # 反映失敗は握り潰さず理由を残す
+            logger.warning(f"[VAE] tiling {'on' if b else 'off'} 即時反映失敗: {e}")
+    msg = (f"[VAE] set_vae_tiling({b}) → env {_VAE_TILING_ENV}={'1' if b else '0'} "
+           f"/ live反映={applied}(次の生成から確実)")
+    logger.info(msg)
+    print(msg)
+    return b
+
+
 class FluxA100PipelineManager:
     """
     戦略別の FluxPipeline を構築・管理する司令塔。
@@ -261,6 +310,9 @@ class FluxA100PipelineManager:
         self.pipe_i2i = None           # FluxImg2ImgPipeline (Pass 2)
         self.pipe_fill = None          # FluxFillPipeline (Phase 3b)
         self.pipe_prior = None         # FluxPriorReduxPipeline (オプション)
+
+        # 観測性(RECON-019): PuLID→素Flux 縮退の検出フラグ(挙動は変えない・OBS に出す)
+        self._pulid_degraded = False
 
         # ─── 共有コンポーネント ───
         self._shared_transformer = None
@@ -497,6 +549,7 @@ class FluxA100PipelineManager:
                     transformer=self._shared_transformer,
                     torch_dtype=self.dtype,
                 )
+                self._pulid_degraded = True   # 観測フラグ(RECON-019): 縮退を OBS で可視化
                 logger.warning("[OBS-A] enable_pulid=True だが PuLIDFluxPipeline 構築失敗 -> 素 FluxPipeline に縮退した")
         else:
             logger.info("  🚀 [3/5] FluxPipeline 構築 (PuLID 無効)")
@@ -1237,14 +1290,22 @@ class FluxA100PipelineManager:
     # ─────────────────────────────────────────────────
 
     def _enable_vae_optimizations(self):
-        """VAE slicing/tiling で高解像度時の OOM 回避"""
+        """VAE slicing/tiling で高解像度時の OOM 回避。
+
+        立体感 Step1.5(RECON-019): tiling は env AIBO_VAE_TILING で A/B 可(既定 True=現状維持)。
+        832×1216 でも tiling のタイル境界ブレンドで高周波が落ちる疑い → off を試せるよう露出。
+        slicing は据置(OOM 回避・他デコード挙動は不変)。
+        """
+        global _ACTIVE_PIPE_MANAGER
+        _ACTIVE_PIPE_MANAGER = self          # set_vae_tiling が live vae を触れるよう登録
         try:
             self.pipe_base.vae.enable_slicing()
-            # ⚠️ tiling は 1024 以下では不要 (オーバーヘッド)
-            # 1536+ の高解像度時のみ有効化することを推奨
-            # ここでは安全のため有効化 (高解像度生成時に効く)
-            self.pipe_base.vae.enable_tiling()
-            logger.info("  ✅ VAE slicing/tiling 有効化")
+            want_tiling = get_vae_tiling()    # env 優先・既定 True(後退ゼロ)
+            if want_tiling:
+                self.pipe_base.vae.enable_tiling()
+            else:
+                self.pipe_base.vae.disable_tiling()
+            logger.info(f"  ✅ VAE slicing 有効化 / tiling={'有効' if want_tiling else '無効(env off)'}")
         except Exception as e:
             logger.info(f"  ℹ️ VAE 最適化スキップ: {e}")
 
