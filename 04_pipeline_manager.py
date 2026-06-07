@@ -1893,6 +1893,67 @@ _BODYCN_PROMPT = (
     "natural light, professional fashion photography, sharp focus"
 )
 
+# body_ref(全身ポーズ参照)置き場。spike が body_ref 不在で止まるのを防ぐ。
+BODYREFS_DIR = "/content/drive/MyDrive/aibo_v7/bodyrefs"
+
+
+def ensure_bodyrefs_dir(path: str = BODYREFS_DIR) -> str:
+    """bodyrefs フォルダを作る(冪等)。作成/存在をログして path を返す。"""
+    os.makedirs(path, exist_ok=True)
+    msg = f"[bodyrefs] dir ready: {path}"
+    logger.info(msg)
+    print(msg)
+    return path
+
+
+def upload_body_ref(name: str = "standing1.jpg", path: str = BODYREFS_DIR):
+    """PO 用: ローカルから全身画像を1枚アップロードして bodyrefs/<name> に保存(Colab 専用)。
+
+    立ち全身の人物写真を1枚。顔クロップ不可。本人でなくて OK
+    (機構テスト・顔は face_ref から別注入される)。複数選択時は最初の1枚を <name> で保存・非画像は弾く。
+    既に Drive に全身画像があるなら、ビューア上部の BODY_REF をそのパスへ書き換えるだけでも可。
+    返り: 保存パス(str)or None。
+    """
+    ensure_bodyrefs_dir(path)
+    print("[upload_body_ref] 立ち全身の人物写真を1枚選んでください "
+          "(顔クロップ不可・本人でなくてOK=機構テスト・顔は face_ref から別注入)。")
+    try:
+        from google.colab import files  # Colab 専用
+    except Exception as e:
+        print(f"[upload_body_ref] google.colab 不在(Colab で実行してください): {e}")
+        print(f"  代替: 既存の全身画像パスを bodycn_ab_run(body_ref=...) / ビューアの BODY_REF に直接指定。")
+        return None
+
+    uploaded = files.upload()  # PO がローカルから選択
+    if not uploaded:
+        print("[upload_body_ref] アップロードなし(キャンセル)。")
+        return None
+
+    exts = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
+    picked = next((fn for fn in uploaded if str(fn).lower().endswith(exts)), None)
+    if picked is None:
+        print(f"[upload_body_ref] 画像ファイルがない(対応: {exts})。全身写真を選び直してください。")
+        return None
+
+    dst = os.path.join(path, name)
+    try:
+        with open(dst, "wb") as f:
+            f.write(uploaded[picked])
+    except Exception as e:
+        print(f"[upload_body_ref] 保存失敗: {e}")
+        return None
+    print(f"[upload_body_ref] 保存: {dst}(元: {picked})")
+    print(f"  → bodycn_ab_run(face_ref=<本人>, body_ref='{dst}') で使えます。")
+    # サムネ表示(任意・失敗しても続行)
+    try:
+        from IPython.display import display
+        img = Image.open(dst).convert("RGB")
+        img.thumbnail((256, 256))
+        display(img)
+    except Exception as e:
+        logger.debug(f"[upload_body_ref] サムネ表示 skip: {e}")
+    return dst
+
 
 class _LogCapture(logging.Handler):
     """生成中の全ログ行をためる一時ハンドラ(CN 経路の実行/フォールバック判定用)。"""
@@ -1944,14 +2005,18 @@ def bodycn_ab_run(face_ref, body_ref, seeds=(0,),
     StudioMode = cfg.StudioMode
     ModeConfig = cfg.ModeConfig
 
+    ensure_bodyrefs_dir()   # body_ref 置き場は常に在る状態に(冪等)
+
     face_img, face_id = _depth_resolve_ref(face_ref)
     if face_img is None:
         print(f"[bodycn][STOP] face_ref: {face_id}")
         return {"ok": False, "reason": f"face_ref: {face_id}"}
     body_img, body_id = _depth_resolve_ref(body_ref)
     if body_img is None:
-        print(f"[bodycn][STOP] body_ref: {body_id}(全身ポーズ参照画像が要る)")
-        return {"ok": False, "reason": f"body_ref: {body_id}"}
+        msg = (f"body_ref 無し: {body_ref} / フォルダは作成済({BODYREFS_DIR})。"
+               f"upload_body_ref() で全身画像をアップロード、または body_ref を既存パスへ変更。")
+        print(f"[bodycn][STOP] {msg}")
+        return {"ok": False, "reason": msg}
 
     bad = [a for a in arms if a not in _BODYCN_ARMS]
     if bad:
