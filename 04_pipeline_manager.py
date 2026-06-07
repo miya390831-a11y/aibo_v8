@@ -44,8 +44,10 @@ from __future__ import annotations
 
 import gc
 import json
+import logging
 import os
 import struct
+import time
 from importlib import import_module
 from pathlib import Path
 from types import MethodType
@@ -1868,6 +1870,219 @@ def depth_ab_run(ref=None, seed=0, out_dir="/content/drive/MyDrive/aibo_v7/depth
     print("[depth_ab] PO 目視で「立体感 vs 似度」(tiling_off が本命)。判定は PO(cos 不使用)。")
     return {"ok": True, "out_dir": out_dir, "results": results, "grids": grids,
             "refs": ref_list, "seeds": seed_list, "conds": cond_names}
+
+
+# ════════════════════════════════════════════════════════════════════════
+# 案C spike · body-CN A/B runner(PORTRAIT で pose-CN を焚く make-or-break)· RECON-024
+#   既存 _run_pass1_with_cn(pose/depth CN + PuLID 共存)を PORTRAIT で body 参照駆動で通す。
+#   MVP=pose 単体。face_ref=顔同一性(PuLID へ)/ body_ref=全身ポーズ参照(CN-pose 抽出へ)。
+#   per-run トグル: PORTRAIT mode の default_enable_multi_cn/default_cn_use_pose を当該 arm だけ
+#   True にして既存 merge(05:240-245)を効かせる → 終了時に必ず復帰=既定後退ゼロ。
+#   ★可観測化(RECON-019 教訓): CN 経路が実行されたか/沈黙フォールバックしてないかをログ捕捉で判定。
+#   核・Setting A 非接触(可変は cn_pose_weight / cn_pose_guidance_end のみ=非ロック)。判定は PO 目視。
+# ════════════════════════════════════════════════════════════════════════
+
+_BODYCN_ARMS = {
+    # arm: (cn_on, cn_pose_weight, cn_pose_guidance_end)
+    "baseline":   (False, None, None),   # CN off = 素の _run_pass1(現状 PORTRAIT)
+    "pose_cn_06": (True,  0.6,  0.6),     # pose 単体・weight 0.6(PuLID 安全側・RECON-024 D6)
+    "pose_cn_09": (True,  0.9,  0.6),     # pose 単体・weight 0.9(Union-Pro 公式上限側)
+}
+_BODYCN_PROMPT = (
+    "full body shot, standing pose, head to toe, entire body visible, "
+    "natural light, professional fashion photography, sharp focus"
+)
+
+
+class _LogCapture(logging.Handler):
+    """生成中の全ログ行をためる一時ハンドラ(CN 経路の実行/フォールバック判定用)。"""
+
+    def __init__(self):
+        super().__init__(level=logging.NOTSET)
+        self.lines = []
+
+    def emit(self, record):
+        try:
+            self.lines.append(record.getMessage())
+        except Exception:
+            return  # 1行整形失敗で計測を止めない(pass にはしない=ここは握り潰し許容の最小例外)
+
+
+def _bodycn_parse_obs(lines):
+    """[Pass 1 CN] ログ群から CN 経路の実行/フォールバック/CN 数を判定(沈黙フォールバック検出)。"""
+    executed = any("[Pass 1 CN] 推論開始" in ln for ln in lines)
+    completed = any("[Pass 1 CN] 完了" in ln for ln in lines)
+    fell_back = any("_run_pass1 にフォールバック" in ln for ln in lines)
+    n_cn = sum(1 for ln in lines if ("🦴 Pose:" in ln) or ("🌊 Depth:" in ln))
+    pose_on = any("🦴 Pose:" in ln for ln in lines)
+    reason = next((ln.strip() for ln in lines if "フォールバック" in ln), None)
+    cn_built = any("ControlNet pipeline" in ln for ln in lines)
+    return {"cn_path_executed": executed, "cn_completed": completed,
+            "cn_fell_back": fell_back, "n_control_images": n_cn,
+            "pose_appended": pose_on, "fallback_reason": reason,
+            "cn_pipeline_built_log": cn_built,
+            # controlnet_block_samples の直接計数は forward ラッパー instrumentation が要る(核非接触で
+            # 今回は範囲外)。executed=True ∧ n_cn>=1 ∧ completed=True を CN 残差注入の証跡とする。
+            "block_injection_evidence": bool(executed and n_cn >= 1 and completed)}
+
+
+def bodycn_ab_run(face_ref, body_ref, seeds=(0,),
+                  arms=("baseline", "pose_cn_06", "pose_cn_09"),
+                  out_dir="/content/drive/MyDrive/aibo_v7/bodycn_ab",
+                  prompt=_BODYCN_PROMPT, width=832, height=1216,
+                  orch=None, show=True):
+    """案C spike: PORTRAIT で pose-CN を焚く make-or-break A/B(depth_ab_run 同型)。
+
+    face_ref=顔同一性(PuLID)/ body_ref=全身ポーズ参照(CN-pose 抽出)。同 face/body/seed/prompt で
+    arms を生成 → 保存 + GRID + 観測 dict(CN 実行/フォールバック・pulid・VRAM・SLA)。
+    per-run トグル(PORTRAIT mode 既定を arm だけ True)→ 終了時に必ず復帰=後退ゼロ。
+    **判定はしない**(PO 目視・cos 不使用)。返り {ok, out_dir, results:[…], grids, …}。
+    """
+    cfg = import_module("01_config")
+    GenerationConfig = cfg.GenerationConfig
+    IdentityConfig = cfg.IdentityConfig
+    StudioMode = cfg.StudioMode
+    ModeConfig = cfg.ModeConfig
+
+    face_img, face_id = _depth_resolve_ref(face_ref)
+    if face_img is None:
+        print(f"[bodycn][STOP] face_ref: {face_id}")
+        return {"ok": False, "reason": f"face_ref: {face_id}"}
+    body_img, body_id = _depth_resolve_ref(body_ref)
+    if body_img is None:
+        print(f"[bodycn][STOP] body_ref: {body_id}(全身ポーズ参照画像が要る)")
+        return {"ok": False, "reason": f"body_ref: {body_id}"}
+
+    bad = [a for a in arms if a not in _BODYCN_ARMS]
+    if bad:
+        print(f"[bodycn][STOP] 未知 arm: {bad}(使えるのは {list(_BODYCN_ARMS)})")
+        return {"ok": False, "reason": f"未知 arm: {bad}"}
+
+    orch, err = _depth_find_orch(orch)
+    if orch is None:
+        print(f"[bodycn][STOP] {err}")
+        return {"ok": False, "reason": err}
+
+    os.makedirs(out_dir, exist_ok=True)
+    device = getattr(orch.pm, "device", "cuda")
+    _cuda = (device == "cuda") and torch.cuda.is_available()
+
+    # PORTRAIT mode 既定を退避(per-run トグル後に必ず復帰=後退ゼロ)
+    pm_mode = ModeConfig.get(StudioMode.PORTRAIT)
+    _orig = (pm_mode.default_enable_multi_cn, pm_mode.default_cn_use_pose, pm_mode.default_cn_use_depth)
+
+    results = []
+    root = logging.getLogger()
+    av = logging.getLogger("AIBO_v7")
+    try:
+        for sd in seeds:
+            items = []
+            for arm in arms:
+                cn_on, w, gend = _BODYCN_ARMS[arm]
+                # per-run トグル: CN arm だけ PORTRAIT mode 既定を True(merge を効かせる)/ baseline は原状
+                if cn_on:
+                    pm_mode.default_enable_multi_cn = True
+                    pm_mode.default_cn_use_pose = True
+                    pm_mode.default_cn_use_depth = False        # MVP=pose 単体
+                else:
+                    (pm_mode.default_enable_multi_cn, pm_mode.default_cn_use_pose,
+                     pm_mode.default_cn_use_depth) = _orig
+
+                gen_cfg = GenerationConfig(prompt=prompt, width=int(width),
+                                           height=int(height), seed=int(sd))
+                id_cfg = IdentityConfig(reference_image=face_img)
+                if cn_on:
+                    id_cfg.pose_reference_image = body_img       # body_ref → pose 抽出元
+                    id_cfg.cn_pose_weight = float(w)             # 非 Setting A=自由
+                    id_cfg.cn_pose_guidance_end = float(gend)    # 非 Setting A=自由
+
+                cap = _LogCapture()
+                prev_prop = av.propagate
+                root.addHandler(cap)
+                root.setLevel(logging.INFO)
+                av.propagate = True
+                if _cuda:
+                    try:
+                        torch.cuda.reset_peak_memory_stats()
+                    except Exception as e:
+                        logger.debug(f"[bodycn] reset_peak skip: {e}")
+                t0 = time.perf_counter()
+                result = None
+                try:
+                    print(f"[bodycn] {face_id} s{sd} {arm}: cn={cn_on} w={w} gend={gend} 生成中 …")
+                    result = orch.generate(gen_cfg=gen_cfg, id_cfg=id_cfg,
+                                           mode=StudioMode.PORTRAIT, save=False)
+                finally:
+                    dt = time.perf_counter() - t0
+                    root.removeHandler(cap)
+                    av.propagate = prev_prop
+
+                lines = list(cap.lines)
+                obs = _bodycn_parse_obs(lines)
+                vram_gb = None
+                if _cuda:
+                    try:
+                        vram_gb = round(torch.cuda.max_memory_allocated() / 1e9, 2)
+                    except Exception:
+                        vram_gb = None
+
+                fimg = getattr(result, "final_image", None)
+                pused = bool(getattr(result, "pulid_used", False))
+                degraded = bool(getattr(result, "pulid_degraded", False))
+                gerr = getattr(result, "error", None)
+                label = f"s{sd}_{arm}"
+                png = None
+                if fimg is not None:
+                    png = os.path.join(out_dir, f"{face_id}_s{sd}_{arm}.png")
+                    try:
+                        fimg.convert("RGB").save(png)
+                    except Exception as e:
+                        logger.warning(f"[bodycn] PNG 保存失敗 {label}: {e}")
+                        png = None
+                    items.append((label, fimg.convert("RGB")))
+                else:
+                    items.append((label, None))
+
+                # 1行可視化([VAE][guard] と同作法・CN 発火を明示)
+                logger.info(
+                    f"[CN][pose] arm={arm} executed={obs['cn_path_executed']} "
+                    f"fellback={obs['cn_fell_back']} n_cn={obs['n_control_images']} "
+                    f"weight={w} guidance_end={gend} pulid_used={pused} "
+                    f"pulid_degraded={degraded} vram_gb={vram_gb} sec={dt:.1f}"
+                )
+                print(f"[bodycn] {label}: CN実行={obs['cn_path_executed']} "
+                      f"フォールバック={obs['cn_fell_back']} n_cn={obs['n_control_images']} "
+                      f"pulid_used={pused} pulid_degraded={'⚠️True' if degraded else 'False'} "
+                      f"vram={vram_gb}GB sec={dt:.1f}")
+                if obs["cn_fell_back"]:
+                    print(f"[bodycn]   ↳ フォールバック理由: {obs['fallback_reason']}")
+                results.append({"face_id": face_id, "body_id": body_id, "seed": sd, "arm": arm,
+                                "png": png, "cn_requested": cn_on,
+                                "cn_pose_weight": w, "cn_pose_guidance_end": gend,
+                                **obs, "pulid_used": pused, "pulid_degraded": degraded,
+                                "vram_peak_gb": vram_gb, "gen_sec": round(dt, 1), "error": gerr})
+            grid = os.path.join(out_dir, f"{face_id}_s{sd}_GRID.png")
+            _depth_grid(items, grid, ncols=len(arms), show=show,
+                        title=f"body-CN spike  face={face_id} body={body_id} seed={sd}  (cols=arm; PO visual)")
+    finally:
+        # PORTRAIT mode 既定を必ず復帰(後退ゼロ)
+        (pm_mode.default_enable_multi_cn, pm_mode.default_cn_use_pose,
+         pm_mode.default_cn_use_depth) = _orig
+        print(f"[bodycn] PORTRAIT mode 既定を復帰: enable_multi_cn={_orig[0]} "
+              f"cn_use_pose={_orig[1]} cn_use_depth={_orig[2]}")
+
+    # 合格条件サマリ(観測値の提示のみ・判定は PO)
+    print("=" * 64)
+    print("[bodycn] 合格条件(PO 判定・cos 不使用): ①体型が変わる ②pulid_degraded=False/本人")
+    print("         ③8-step 破綻なし ④VRAM<42GB・SLA~30s ⑤CN executed=True∧fellback=False")
+    for r in results:
+        if r["arm"] != "baseline":
+            print(f"  - {r['arm']}: ⑤executed={r['cn_path_executed']} fellback={r['cn_fell_back']} "
+                  f"n_cn={r['n_control_images']} ②degraded={r['pulid_degraded']} "
+                  f"④{r['vram_peak_gb']}GB/{r['gen_sec']}s")
+    print("[bodycn] 判定は PO 目視。フォールバック/崩壊なら §2 ログで原因切り分け(司令部へ)。")
+    return {"ok": True, "out_dir": out_dir, "results": results,
+            "face_id": face_id, "body_id": body_id, "arms": list(arms), "seeds": list(seeds)}
 
 
 # ============================================================================
