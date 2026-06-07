@@ -545,6 +545,27 @@ class CharacterOrchestrator:
                     logger.info("🔧 [Phase 2 v2] post-attach wrap 再設置完了")
 
             logger.info(f"[OBS-C] pulid_used={result.pulid_used} / id_embeds={'有' if 'id_embeds' in identity_data else '無'} / faces_detected={getattr(getattr(self.ie, 'pulid_extractor', None), '_last_face_count', 'n/a')}")
+
+            # ─── 動的 VAE tiling ガード(Step1.6 / RECON-020・必須A)───
+            #   フラグ VAE_TILING_GUARD=True 時のみ・env 明示が無い時だけ、解像度で自動切替:
+            #   max(W,H) > 1536 → ON(whole-frame decode の OOM 回避)/ ≤1536 → OFF(高周波=立体感)。
+            #   素朴グローバル False フリップは共有 VAE + 最大2048 で OOM(本番500)→ 禁止(RECON-020 §4)。
+            #   env を書かない _apply_vae_tiling_live で live vae 直叩き(env 明示 > 自動 を保つ)。
+            _cfgm = import_module("01_config")
+            if getattr(_cfgm, "VAE_TILING_GUARD", False):
+                if os.environ.get("AIBO_VAE_TILING") is None:
+                    _pmm = import_module("04_pipeline_manager")
+                    _long = max(int(gen_cfg.width), int(gen_cfg.height))
+                    _tiling_on = _long > 1536
+                    _applied = _pmm._apply_vae_tiling_live(_tiling_on)
+                    logger.info(
+                        f"[VAE][guard] long={_long} → tiling="
+                        f"{'ON(>1536·OOM回避)' if _tiling_on else 'OFF(≤1536·品質)'} "
+                        f"(live反映={_applied})"
+                    )
+                else:
+                    logger.info("[VAE][guard] env AIBO_VAE_TILING 明示あり → 自動ガード skip(明示優先)")
+
             # ─── 5. Pass 1: txt2img ───
             t0_p1 = time.perf_counter()
             use_cn = id_cfg.enable_multi_cn and (id_cfg.cn_use_pose or id_cfg.cn_use_depth)

@@ -88,6 +88,14 @@ ANGLE_BYPASS_YAW_DEG: float = 35.0
 FACE_MASK_FEATHER_PX: int = 21
 FACE_MASK_MARGIN_RATIO: float = 0.20
 
+# ─── 立体感 Step1.6(RECON-020): VAE tiling 動的ガード ───
+# True で「Pass1 直前に解像度判定で VAE tiling を自動 on/off」:
+#   max(W,H) > 1536 → ON(whole-frame decode の OOM 回避)/ ≤1536 → OFF(高周波=立体感を残す)。
+# 素朴な env グローバル False フリップは共有 VAE + 最大2048 で OOM(本番500)になるため使わない。
+# env AIBO_VAE_TILING の明示指定はこのガードに優先(明示 > 自動)。
+# 既定 False = 現状維持(後退ゼロ)。本番フリップは確認スイープ合格後に司令部が True にする。
+VAE_TILING_GUARD: bool = False
+
 # ─── Phase 3 用プロンプト ───
 NEGATIVE_PROMPT_BASE: str = (
     "smooth skin, plastic, cgi, airbrushed, doll-like, "
