@@ -66,6 +66,34 @@ except ImportError:
 _GFPGANER = None
 _INSIGHTFACE_APP = None
 
+# ── 立体感 Step1: GFPGAN 効果の alpha-blend(α=1.0 現状フル / α=0.0 原画そのまま)──
+#   Setting A の network weight(GFPGANer の weight= · 0.0 固定・厳守不変)には触らない。
+#   ここで足すのは paste-back 後の「restored×α + original×(1−α)」という別レバー(肌平滑化の量)。
+#   既定 α=1.0 = 恒等(後退ゼロ)。env AIBO_GFPGAN_BLEND で再起動なしスイープ可(A/B 用)。
+_GFPGAN_BLEND_ENV = "AIBO_GFPGAN_BLEND"
+
+
+def set_gfpgan_blend(alpha) -> float:
+    """GFPGAN 効果の alpha を env で設定(再起動なし・A/B スイープ用)。0.0=原画 / 1.0=現状フル。"""
+    a = max(0.0, min(1.0, float(alpha)))
+    os.environ[_GFPGAN_BLEND_ENV] = repr(a)
+    msg = f"[Phase 3a] set_gfpgan_blend({a}) → env {_GFPGAN_BLEND_ENV}={a}(次の生成から反映)"
+    logger.info(msg)
+    print(msg)
+    return a
+
+
+def get_gfpgan_blend():
+    """現在の env 上書き値(未設定なら None)。[0,1] にクランプ。"""
+    v = os.environ.get(_GFPGAN_BLEND_ENV)
+    if v is None:
+        return None
+    try:
+        return max(0.0, min(1.0, float(v)))
+    except (TypeError, ValueError):
+        logger.warning(f"[Phase 3a] env {_GFPGAN_BLEND_ENV}={v!r} を float 解釈できず無視")
+        return None
+
 
 @dataclass
 class FaceRestoreResult:
@@ -102,6 +130,7 @@ class FaceRestoreEngine:
         pipeline_manager,
         sys_cfg,
         gfpgan_strength: float = 0.35,
+        gfpgan_blend: float = 1.0,
         fill_denoising: float = 0.25,
         angle_bypass_yaw_deg: float = 35.0,
         face_mask_feather_px: int = 21,
@@ -110,6 +139,8 @@ class FaceRestoreEngine:
         self.pm = pipeline_manager
         self.sys_cfg = sys_cfg
         self.gfpgan_strength = gfpgan_strength
+        # 立体感 Step1: GFPGAN 効果の混合率 α(0=原画 / 1=現状フル)。既定 1.0=後退ゼロ。
+        self.gfpgan_blend = max(0.0, min(1.0, float(gfpgan_blend)))
         self.fill_denoising = fill_denoising
         self.angle_bypass_yaw_deg = angle_bypass_yaw_deg
         self.face_mask_feather_px = face_mask_feather_px
@@ -118,6 +149,7 @@ class FaceRestoreEngine:
         self._last_insightface_face = None
         logger.info(
             f"[FaceRestoreEngine] 初期化: gfpgan_strength={gfpgan_strength}, "
+            f"gfpgan_blend={self.gfpgan_blend}, "
             f"fill_denoising={fill_denoising}, angle_bypass_yaw={angle_bypass_yaw_deg}°"
         )
 
@@ -310,7 +342,24 @@ class FaceRestoreEngine:
             weight=self.gfpgan_strength,
         )
         restored_rgb = cv2.cvtColor(restored_img, cv2.COLOR_BGR2RGB)
-        return Image.fromarray(restored_rgb)
+        restored_pil = Image.fromarray(restored_rgb)
+
+        # ── 立体感 Step1: restored×α + original×(1−α)(α=1.0 で現状フル=後退ゼロ)──
+        #   env(AIBO_GFPGAN_BLEND)があれば優先(再起動なし A/B)、無ければ engine 既定。
+        env_a = get_gfpgan_blend()
+        alpha = self.gfpgan_blend if env_a is None else env_a
+        if alpha >= 0.999:
+            return restored_pil                              # 現状フル(恒等・後退ゼロ)
+        original_pil = image.convert("RGB")
+        if original_pil.size != restored_pil.size:           # GFPGAN upscale=1 なので通常一致
+            logger.warning(
+                f"[Phase 3a] alpha-blend skip: size 不一致 "
+                f"orig={original_pil.size} restored={restored_pil.size} → restored を返す"
+            )
+            return restored_pil
+        blended = Image.blend(original_pil, restored_pil, float(alpha))  # α=0→原画 / 1→restored
+        logger.info(f"[Phase 3a] GFPGAN alpha-blend α={alpha:.3f}(0=原画/1=現状フル)")
+        return blended
 
     def _apply_fill_inpaint(
         self,

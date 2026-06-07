@@ -373,6 +373,7 @@ class CharacterOrchestrator:
                 pipeline_manager=self.pm,
                 sys_cfg=self.sys_cfg,
                 gfpgan_strength=getattr(cfg_mod, "GFPGAN_STRENGTH", 0.35),
+                gfpgan_blend=getattr(cfg_mod, "GFPGAN_BLEND", 1.0),  # 立体感 Step1: 既定 1.0=後退ゼロ
                 fill_denoising=getattr(cfg_mod, "FILL_DENOISING", 0.25),
                 angle_bypass_yaw_deg=getattr(cfg_mod, "ANGLE_BYPASS_YAW_DEG", 35.0),
                 face_mask_feather_px=getattr(cfg_mod, "FACE_MASK_FEATHER_PX", 21),
