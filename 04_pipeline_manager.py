@@ -1980,10 +1980,19 @@ def _bodycn_parse_obs(lines):
     pose_on = any("🦴 Pose:" in ln for ln in lines)
     reason = next((ln.strip() for ln in lines if "フォールバック" in ln), None)
     cn_built = any("ControlNet pipeline" in ln for ln in lines)
+    # ── RECON-025 IP-Adapter 経路の可観測化(既存ログを拾うだけ・核非接触)──
+    #   cn_ip_restored: attach が _pulid_ip_embeds をセットしたか(= prepare で encode_face 成功
+    #                   = ip_adapter.is_loaded・03:1700 のログ)。
+    #   cn_ip_injected: 休眠ブロック(04:935-960)が forward で IP を発火させたか(03→04 の wrapper ログ)。
+    #   → CN arm で injected=True なら「IP は既に CN forward に乗っている」(根因は scale/D-jak 側)、
+    #      restored=False なら「IP 未ロード(is_loaded=False)」= 別 fix(IP ロード)が要る、を切り分ける。
+    ip_restored = any("_pulid_ip_embeds attribute セット完了" in ln for ln in lines)
+    ip_injected = any("[Stage 4-D-2] IP-Adapter 注入" in ln for ln in lines)
     return {"cn_path_executed": executed, "cn_completed": completed,
             "cn_fell_back": fell_back, "n_control_images": n_cn,
             "pose_appended": pose_on, "fallback_reason": reason,
             "cn_pipeline_built_log": cn_built,
+            "cn_ip_restored": ip_restored, "cn_ip_injected": ip_injected,
             # controlnet_block_samples の直接計数は forward ラッパー instrumentation が要る(核非接触で
             # 今回は範囲外)。executed=True ∧ n_cn>=1 ∧ completed=True を CN 残差注入の証跡とする。
             "block_injection_evidence": bool(executed and n_cn >= 1 and completed)}
@@ -2110,15 +2119,17 @@ def bodycn_ab_run(face_ref, body_ref, seeds=(0,),
                 else:
                     items.append((label, None))
 
-                # 1行可視化([VAE][guard] と同作法・CN 発火を明示)
+                # 1行可視化([VAE][guard] と同作法・CN 発火 + IP 経路を明示)
                 logger.info(
                     f"[CN][pose] arm={arm} executed={obs['cn_path_executed']} "
                     f"fellback={obs['cn_fell_back']} n_cn={obs['n_control_images']} "
+                    f"ip_restored={obs['cn_ip_restored']} ip_injected={obs['cn_ip_injected']} "
                     f"weight={w} guidance_end={gend} pulid_used={pused} "
                     f"pulid_degraded={degraded} vram_gb={vram_gb} sec={dt:.1f}"
                 )
                 print(f"[bodycn] {label}: CN実行={obs['cn_path_executed']} "
                       f"フォールバック={obs['cn_fell_back']} n_cn={obs['n_control_images']} "
+                      f"ip_restored={obs['cn_ip_restored']} ip_injected={obs['cn_ip_injected']} "
                       f"pulid_used={pused} pulid_degraded={'⚠️True' if degraded else 'False'} "
                       f"vram={vram_gb}GB sec={dt:.1f}")
                 if obs["cn_fell_back"]:
