@@ -43,7 +43,9 @@ Version: v7.2
 from __future__ import annotations
 
 import gc
+import json
 import os
+import struct
 from importlib import import_module
 from pathlib import Path
 from types import MethodType
@@ -101,6 +103,86 @@ class _DummyEncoderHidProj:
 # ⚒️ Section 4.0 · ヘルパ
 # ============================================================================
 
+# ============================================================================
+# 🛡️ C0 · safetensors ロード前検証ゲート (RECON-002 / IMPL-001)
+#   Drive FUSE 越しの巨大 safetensors 途中切れ → 素 Flux 縮退(外国人化)を
+#   ロード前に loud に fail-fast させる。header だけ読む軽量検証。
+# ============================================================================
+
+class C0VerificationError(RuntimeError):
+    """C0 検証で safetensors の破損を検知した時に投げる。
+    既存の degrade-except に飲まれず fail-fast させるための専用型。"""
+
+
+def verify_safetensors(path) -> tuple[bool, str]:
+    """safetensors を header だけ読んで完全性を検証する(全体は読まない)。
+    戻り値 (ok, reason)。"""
+    size = os.path.getsize(path)
+    if size < 8:
+        return (False, "smaller-than-header")
+    with open(path, "rb") as f:
+        N = struct.unpack("<Q", f.read(8))[0]          # header 長 (LE u64)
+        if 8 + N > size:
+            return (False, "header-truncated")
+        head = f.read(N)
+        if head[:1] != b"{":
+            return (False, "not-json-header")
+        meta = json.loads(head)
+        max_end = max(v["data_offsets"][1]
+                      for k, v in meta.items() if k != "__metadata__")
+    expected = 8 + N + max_end
+    if expected != size:
+        return (False, f"not-fully-covered expected={expected} actual={size}")
+    return (True, "ok")
+
+
+def _c0_verify_file(name: str, path) -> None:
+    """具体的なローカルパスに対し C0 検証。FAIL なら error ログ + raise。"""
+    if not path or not os.path.exists(path):
+        logger.warning(f"[C0] SKIP {name}: path unresolved/absent path={path}")
+        return
+    ok, reason = verify_safetensors(path)
+    if ok:
+        logger.info(f"[C0] OK {name} {path}")
+        return
+    logger.error(f"[C0] FAIL {name} safetensors: {reason} path={path}")
+    raise C0VerificationError(f"[C0] {name}: {reason} path={path}")
+
+
+def _c0_verify_hf_single(name: str, repo_id: str, filename: str) -> None:
+    """HF cache 上の単一ファイルの実体パスを解決して C0 検証(DL はしない)。
+    cache に無ければ warn でスキップ(握りつぶさない)。"""
+    try:
+        from huggingface_hub import try_to_load_from_cache
+        path = try_to_load_from_cache(repo_id=repo_id, filename=filename)
+    except Exception as e:
+        logger.warning(f"[C0] SKIP {name}: cache 解決失敗 repo={repo_id} file={filename} ({e})")
+        return
+    if not isinstance(path, str):
+        logger.warning(f"[C0] SKIP {name}: HF cache 未在 repo={repo_id} file={filename}")
+        return
+    _c0_verify_file(name, path)
+
+
+def _c0_verify_hf_repo(name: str, repo_id: str) -> None:
+    """repo 内の cache 済み *.safetensors を列挙して各々 C0 検証(best-effort)。
+    snapshot を解決できなければ warn でスキップ(握りつぶさない)。"""
+    try:
+        from huggingface_hub import snapshot_download
+        snap = snapshot_download(repo_id=repo_id,
+                                 allow_patterns=["*.safetensors"],
+                                 local_files_only=True)
+    except Exception as e:
+        logger.warning(f"[C0] SKIP {name}: snapshot 未解決 repo={repo_id} ({e})")
+        return
+    files = sorted(Path(snap).rglob("*.safetensors"))
+    if not files:
+        logger.warning(f"[C0] SKIP {name}: cache 済み safetensors 無し repo={repo_id}")
+        return
+    for fp in files:
+        _c0_verify_file(f"{name}:{fp.name}", str(fp))
+
+
 def _flush_vram():
     """VRAM クリーンアップ"""
     gc.collect()
@@ -155,6 +237,72 @@ def _resolve_city96_gguf_filename(preferred: str, repo_files: set[str]) -> tuple
 # 🏛️ Section 4.1 · FluxA100PipelineManager
 # ============================================================================
 
+# ============================================================================
+# 🎚️ 立体感 Step1.5 · VAE tiling トグル(A/B 可能化・RECON-019)
+#   832×1216 でも tiling が発動するとタイル境界ブレンドで高周波が落ちる疑い。
+#   ここでは「tiling の on/off だけ」を env / setter で切替可能にする(他のデコード挙動は不変)。
+#   既定 True = 現状維持(後退ゼロ)。env AIBO_VAE_TILING で再起動なしスイープ可。
+# ============================================================================
+_VAE_TILING_ENV = "AIBO_VAE_TILING"
+_ACTIVE_PIPE_MANAGER = None   # set_vae_tiling が live vae を即時反映するための参照
+
+
+def _parse_bool_env(v):
+    if v is None:
+        return None
+    s = str(v).strip().lower()
+    if s in ("1", "true", "on", "yes", "y"):
+        return True
+    if s in ("0", "false", "off", "no", "n"):
+        return False
+    return None
+
+
+def get_vae_tiling() -> bool:
+    """現在の VAE tiling 既定(env 優先・未設定なら True=現状維持)。"""
+    b = _parse_bool_env(os.environ.get(_VAE_TILING_ENV))
+    return True if b is None else b
+
+
+def set_vae_tiling(enabled) -> bool:
+    """VAE tiling を on/off(env 設定 + live vae 即時反映・再起動なし A/B)。既定 True=現状維持。
+
+    A/B: set_vae_tiling(False) で次の生成から tiling 無効(タイル境界ブレンドの高周波落ちを消す)。
+    """
+    b = bool(enabled)
+    os.environ[_VAE_TILING_ENV] = "1" if b else "0"
+    applied = False
+    vae = getattr(getattr(_ACTIVE_PIPE_MANAGER, "pipe_base", None), "vae", None)
+    if vae is not None:
+        try:
+            vae.enable_tiling() if b else vae.disable_tiling()
+            applied = True
+        except Exception as e:                       # 反映失敗は握り潰さず理由を残す
+            logger.warning(f"[VAE] tiling {'on' if b else 'off'} 即時反映失敗: {e}")
+    msg = (f"[VAE] set_vae_tiling({b}) → env {_VAE_TILING_ENV}={'1' if b else '0'} "
+           f"/ live反映={applied}(次の生成から確実)")
+    logger.info(msg)
+    print(msg)
+    return b
+
+
+def _apply_vae_tiling_live(enabled) -> bool:
+    """live vae にだけ tiling を反映(env は触らない=動的ガード用)。返り applied bool。
+
+    set_vae_tiling と違い env(AIBO_VAE_TILING)を書かない → 「env 明示指定 > 自動ガード」を保つ
+    (ガードが env を書くと次回以降「明示扱い」になり判定が壊れるため、ガードは live vae 直叩き)。
+    """
+    vae = getattr(getattr(_ACTIVE_PIPE_MANAGER, "pipe_base", None), "vae", None)
+    if vae is None:
+        return False
+    try:
+        vae.enable_tiling() if enabled else vae.disable_tiling()
+        return True
+    except Exception as e:
+        logger.warning(f"[VAE] 動的ガード live反映失敗: {e}")
+        return False
+
+
 class FluxA100PipelineManager:
     """
     戦略別の FluxPipeline を構築・管理する司令塔。
@@ -179,6 +327,9 @@ class FluxA100PipelineManager:
         self.pipe_i2i = None           # FluxImg2ImgPipeline (Pass 2)
         self.pipe_fill = None          # FluxFillPipeline (Phase 3b)
         self.pipe_prior = None         # FluxPriorReduxPipeline (オプション)
+
+        # 観測性(RECON-019): PuLID→素Flux 縮退の検出フラグ(挙動は変えない・OBS に出す)
+        self._pulid_degraded = False
 
         # ─── 共有コンポーネント ───
         self._shared_transformer = None
@@ -277,6 +428,7 @@ class FluxA100PipelineManager:
         flux_model_id = f"{self.sys_cfg.nunchaku_repo}/{flux_filename}"
 
         logger.info(f"  📥 [1/4] Nunchaku Transformer ロード: {flux_filename}")
+        _c0_verify_hf_single("transformer", self.sys_cfg.nunchaku_repo, flux_filename)
         try:
             self._shared_transformer = NunchakuFluxTransformer2dModel.from_pretrained(
                 flux_model_id,
@@ -339,6 +491,7 @@ class FluxA100PipelineManager:
         skip_pipe_base_to_cuda = False  # enable_model_cpu_offload 成功時のみ True (④ と整合)
         _flush_vram()
         logger.info(f"  🧹 [VRAM] PuLIDFluxPipeline 構築前のクリーンアップ完了 (使用中: {_vram_used_gb():.1f} GB)")
+        _c0_verify_hf_repo("base", self.sys_cfg.base_model_repo)
 
         if self.sys_cfg.enable_pulid:
             try:
@@ -413,6 +566,8 @@ class FluxA100PipelineManager:
                     transformer=self._shared_transformer,
                     torch_dtype=self.dtype,
                 )
+                self._pulid_degraded = True   # 観測フラグ(RECON-019): 縮退を OBS で可視化
+                logger.warning("[OBS-A] enable_pulid=True だが PuLIDFluxPipeline 構築失敗 -> 素 FluxPipeline に縮退した")
         else:
             logger.info("  🚀 [3/5] FluxPipeline 構築 (PuLID 無効)")
             self.pipe_base = FluxPipeline.from_pretrained(
@@ -433,6 +588,7 @@ class FluxA100PipelineManager:
                 logger.info(f"  ℹ️ pipe_base.to(cuda) スキップ: {e}")
 
         self._shared_vae = self.pipe_base.vae
+        logger.info(f"[OBS-A] pipe_base class = {type(self.pipe_base).__name__} / enable_pulid={self.sys_cfg.enable_pulid}")
 
         # ─── 4. FBCache 封印 (PuLID×CN 衝突防止) ───
         self._seal_fbcache()
@@ -473,6 +629,7 @@ class FluxA100PipelineManager:
         # ─── 1. Shakker Union Pro 2.0 を BF16 でロード ──────────
         cn_repo = "Shakker-Labs/FLUX.1-dev-ControlNet-Union-Pro-2.0"
         logger.info(f"🎛️ [Stage 3b] ControlNet Union Pro 2.0 ロード: {cn_repo}")
+        _c0_verify_hf_repo("controlnet", cn_repo)
 
         self.controlnet_model = FluxControlNetModel.from_pretrained(
             cn_repo,
@@ -1006,6 +1163,7 @@ class FluxA100PipelineManager:
                 repo_id=self.sys_cfg.hyper_flux_repo,
                 filename=self.sys_cfg.hyper_flux_filename,
             )
+            _c0_verify_file("hyper_flux", hyper_path)
             self._shared_transformer.update_lora_params(hyper_path)
 
             # Hyper-FLUX の strength を確実に適用 (ACE++ 撤去後の最終値)
@@ -1015,6 +1173,8 @@ class FluxA100PipelineManager:
             self._shared_transformer.set_lora_strength(hyper_strength)
             self._hyper_flux_loaded = True
             logger.info(f"✅ Hyper-FLUX loaded · strength={hyper_strength}")
+        except C0VerificationError:
+            raise
         except Exception as e:
             logger.warning(f"  ⚠️ Hyper-FLUX 注入失敗: {e}")
             logger.warning("     → LoRA なしで続行 · 28 steps 相当に降格")
@@ -1147,14 +1307,22 @@ class FluxA100PipelineManager:
     # ─────────────────────────────────────────────────
 
     def _enable_vae_optimizations(self):
-        """VAE slicing/tiling で高解像度時の OOM 回避"""
+        """VAE slicing/tiling で高解像度時の OOM 回避。
+
+        立体感 Step1.5(RECON-019): tiling は env AIBO_VAE_TILING で A/B 可(既定 True=現状維持)。
+        832×1216 でも tiling のタイル境界ブレンドで高周波が落ちる疑い → off を試せるよう露出。
+        slicing は据置(OOM 回避・他デコード挙動は不変)。
+        """
+        global _ACTIVE_PIPE_MANAGER
+        _ACTIVE_PIPE_MANAGER = self          # set_vae_tiling が live vae を触れるよう登録
         try:
             self.pipe_base.vae.enable_slicing()
-            # ⚠️ tiling は 1024 以下では不要 (オーバーヘッド)
-            # 1536+ の高解像度時のみ有効化することを推奨
-            # ここでは安全のため有効化 (高解像度生成時に効く)
-            self.pipe_base.vae.enable_tiling()
-            logger.info("  ✅ VAE slicing/tiling 有効化")
+            want_tiling = get_vae_tiling()    # env 優先・既定 True(後退ゼロ)
+            if want_tiling:
+                self.pipe_base.vae.enable_tiling()
+            else:
+                self.pipe_base.vae.disable_tiling()
+            logger.info(f"  ✅ VAE slicing 有効化 / tiling={'有効' if want_tiling else '無効(env off)'}")
         except Exception as e:
             logger.info(f"  ℹ️ VAE 最適化スキップ: {e}")
 
@@ -1182,6 +1350,7 @@ class FluxA100PipelineManager:
             "pipe_fill": self.pipe_fill is not None,
             "pipe_prior": self.pipe_prior is not None,
             "hyper_flux_loaded": self._hyper_flux_loaded,
+            "pipe_base_class": type(self.pipe_base).__name__ if self.pipe_base is not None else None,
             "vram_used_gb": _vram_used_gb(),
         }
 
@@ -1505,6 +1674,200 @@ class AssetManager:
         self.references = ReferenceImageDB(sys_cfg)
 
         logger.info("📦 AssetManager 初期化完了 (lora + upscaler + references)")
+
+
+# ============================================================================
+# 🎬 立体感 A/B 一発ランナー · depth_ab_run(Step1.5 露出ノブで4条件→グリッド)
+#   set_vae_tiling(本モジュール)/ set_gfpgan_blend(08)を使い、本番 PORTRAIT パス
+#   (op0.6・8step・既定プロンプト/サイズ)で baseline/tiling_off/gfpgan_skip/both を
+#   同一 ref/seed で生成。A3 は OFF(env を設定しない)。終了時に既定(tiling True /
+#   blend 1.0)へ復帰=後退ゼロ。**判定はしない**(RECON-018: PO 目視が権威・cos 不使用)。
+# ============================================================================
+
+_DEPTH_AB_CONDS = [
+    # (name, vae_tiling, gfpgan_blend)
+    ("baseline",    True,  1.0),   # 現状
+    ("tiling_off",  False, 1.0),   # ← 本命
+    ("gfpgan_skip", True,  0.0),   # crop/paste-back 往復の軟化を消す
+    ("both",        False, 0.0),
+]
+
+_DEPTH_DEFAULT_PROMPT = "a portrait photo of a person, natural light, looking at camera"
+
+
+def _depth_find_orch(orch=None):
+    """起動済み orchestrator を取得(引数優先 → 09_fastapi_server.get_orchestrator())。"""
+    if orch is not None:
+        return orch, None
+    try:
+        srv = import_module("09_fastapi_server")
+        return srv.get_orchestrator(), None
+    except Exception as e:
+        return None, f"orchestrator 取得失敗: {e}(先に UI/サーバを起動して1枚生成しておく)"
+
+
+def _depth_resolve_ref(ref):
+    """ref を (PIL.Image RGB, ref_id) に正規化(パス str / PIL を受ける)。失敗は (None, 理由)。"""
+    if isinstance(ref, Image.Image):
+        return ref.convert("RGB"), "ref"
+    if isinstance(ref, str):
+        if not os.path.exists(ref):
+            return None, f"ref パスが無い: {ref}"
+        rid = os.path.splitext(os.path.basename(ref))[0]
+        return Image.open(ref).convert("RGB"), rid
+    return None, f"ref の型が非対応: {type(ref).__name__}(パス str か PIL.Image を渡す)"
+
+
+def _depth_grid(items, out_png, *, title="", ncols=2, show=True):
+    """items=[(label, PIL or None)] を ncols 列グリッドで保存 + inline 表示。返り out_png or None。
+
+    ラベルは ASCII 前提(Colab に CJK フォントが無くても tofu 化しないように呼び元で ASCII を渡す)。
+    """
+    try:
+        import matplotlib.pyplot as plt
+        import numpy as np
+    except Exception as e:
+        logger.warning(f"[depth_ab] matplotlib/numpy 不在でグリッド省略: {e}")
+        return None
+    n = len(items)
+    if n == 0:
+        return None
+    ncols = max(1, int(ncols))
+    nrows = (n + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 5, nrows * 6))
+    axes = np.atleast_1d(axes).reshape(-1)
+    for ax in axes:
+        ax.axis("off")
+    for i, (label, im) in enumerate(items):
+        ax = axes[i]
+        if im is not None:
+            ax.imshow(np.asarray(im))
+        else:
+            ax.text(0.5, 0.5, "(no image)", ha="center", va="center")
+        ax.set_title(label, fontsize=12)
+    if title:
+        fig.suptitle(title, fontsize=12)
+    fig.tight_layout()
+    try:
+        fig.savefig(out_png, dpi=110, bbox_inches="tight")
+    except Exception as e:
+        logger.warning(f"[depth_ab] グリッド保存失敗: {e}")
+        out_png = None
+    if show:
+        try:
+            plt.show()
+        except Exception as e:
+            logger.debug(f"[depth_ab] inline 表示 skip(非 Colab 等): {e}")
+    plt.close(fig)
+    return out_png
+
+
+def depth_ab_run(ref=None, seed=0, out_dir="/content/drive/MyDrive/aibo_v7/depth_ab",
+                 prompt=_DEPTH_DEFAULT_PROMPT, width=832, height=1216,
+                 orch=None, show=True, refs=None, seeds=None, conds=None):
+    """立体感 A/B ランナー(スイープ対応・後方互換)。本番 PORTRAIT パス(op0.6・8step・既定prompt/size)。
+
+    後方互換(単発): depth_ab_run("<ref>", seed=0) → 1 ref / 4条件 / seed0。
+    スイープ: depth_ab_run(refs=[...], seeds=(0,1,2), conds=("baseline","tiling_off"))。
+    全 ref × seed × cond をループ → **ref ごとにグリッド(行=seed・列=cond)** + PNG 保存。
+    各条件で set_vae_tiling + set_gfpgan_blend を適用。A3 は OFF(env 未設定)。
+    終了時に既定(tiling True / blend 1.0)へ復帰=後退ゼロ。**判定はしない**(PO 目視が権威・cos 不使用)。
+    返り: {ok, out_dir, results:[{ref_id,seed,name,png,…}], grids:{ref_id:png}, refs, seeds, conds}。
+    """
+    fr = import_module("08_face_refiner")
+    set_blend = fr.set_gfpgan_blend
+
+    # ── 引数正規化(後方互換: ref/seed 単発 ⇄ refs/seeds/conds スイープ)──
+    ref_list = list(refs) if refs is not None else ([ref] if ref is not None else [])
+    if not ref_list:
+        msg = "ref / refs が空(パス str か PIL.Image を1つ以上渡す)"
+        print(f"[depth_ab][STOP] {msg}")
+        return {"ok": False, "reason": msg}
+    seed_list = [int(s) for s in (seeds if seeds is not None else [seed])]
+    cond_map = {name: (t, b) for (name, t, b) in _DEPTH_AB_CONDS}
+    cond_names = list(conds) if conds is not None else [c[0] for c in _DEPTH_AB_CONDS]
+    bad = [c for c in cond_names if c not in cond_map]
+    if bad:
+        msg = f"未知の条件: {bad}(使えるのは {list(cond_map)})"
+        print(f"[depth_ab][STOP] {msg}")
+        return {"ok": False, "reason": msg}
+
+    orch, err = _depth_find_orch(orch)
+    if orch is None:
+        print(f"[depth_ab][STOP] {err}")
+        return {"ok": False, "reason": err}
+
+    cfg = import_module("01_config")
+    GenerationConfig = cfg.GenerationConfig
+    IdentityConfig = cfg.IdentityConfig
+    StudioMode = cfg.StudioMode
+    os.makedirs(out_dir, exist_ok=True)
+
+    results = []
+    grids = {}
+    try:
+        for rf in ref_list:
+            img, ref_id = _depth_resolve_ref(rf)
+            if img is None:
+                logger.warning(f"[depth_ab] ref skip: {ref_id}")   # ref_id にはエラー理由が入る
+                print(f"[depth_ab] ref skip: {ref_id}")
+                continue
+            items = []
+            for sd in seed_list:
+                for name in cond_names:
+                    tiling, blend = cond_map[name]
+                    set_vae_tiling(tiling)        # 本モジュール(live vae 即時反映)
+                    set_blend(blend)              # 08_face_refiner(次の生成から)
+                    # op0.6: pulid_weight は IdentityConfig 既定(=0.6・OP-CHANGE-001)=本番同等
+                    gen_cfg = GenerationConfig(prompt=prompt, width=int(width),
+                                               height=int(height), seed=int(sd))
+                    id_cfg = IdentityConfig(reference_image=img)
+                    print(f"[depth_ab] {ref_id} s{sd} {name}: "
+                          f"vae_tiling={tiling} gfpgan_blend={blend} 生成中 …")
+                    result = orch.generate(gen_cfg=gen_cfg, id_cfg=id_cfg,
+                                           mode=StudioMode.PORTRAIT, save=False)
+                    fimg = getattr(result, "final_image", None)
+                    # 条件が効いてる確証: 実 vae の tiling 状態 + pulid_degraded(縮退してないか)
+                    vae = getattr(getattr(orch.pm, "pipe_base", None), "vae", None)
+                    vae_on = getattr(vae, "use_tiling", None)
+                    degraded = bool(getattr(result, "pulid_degraded", False))
+                    pused = bool(getattr(result, "pulid_used", False))
+                    gerr = getattr(result, "error", None)
+                    label = f"s{sd}_{name}"
+                    png = None
+                    if fimg is not None:
+                        png = os.path.join(out_dir, f"{ref_id}_s{sd}_{name}.png")
+                        try:
+                            fimg.convert("RGB").save(png)
+                        except Exception as e:
+                            logger.warning(f"[depth_ab] PNG 保存失敗 {label}: {e}")
+                            png = None
+                        items.append((label, fimg.convert("RGB")))
+                    else:
+                        items.append((label, None))
+                    logger.info(f"[depth_ab][OBS] {ref_id} {label}: vae.use_tiling={vae_on} "
+                                f"pulid_used={pused} pulid_degraded={degraded} err={gerr} png={png}")
+                    print(f"[depth_ab] {ref_id} {label}: 完了 vae.use_tiling={vae_on} "
+                          f"pulid_used={pused} pulid_degraded={'⚠️True' if degraded else 'False'}")
+                    results.append({"ref_id": ref_id, "seed": sd, "name": name, "png": png,
+                                    "vae_tiling": tiling, "gfpgan_blend": blend,
+                                    "vae_use_tiling": vae_on, "pulid_used": pused,
+                                    "pulid_degraded": degraded, "error": gerr})
+            grid_png = os.path.join(out_dir, f"{ref_id}_GRID.png")
+            grids[ref_id] = _depth_grid(
+                items, grid_png, ncols=len(cond_names), show=show,
+                title=f"depth A/B  ref={ref_id}  (rows=seed, cols=cond; PO visual: depth vs identity)")
+    finally:
+        # 既定へ復帰(後退ゼロ): tiling True / blend 1.0
+        set_vae_tiling(True)
+        set_blend(1.0)
+        print("[depth_ab] 既定へ復帰: vae_tiling=True / gfpgan_blend=1.0")
+
+    print(f"[depth_ab] 完了 → {out_dir}"
+          f"(refs={len(ref_list)} seeds={len(seed_list)} conds={len(cond_names)})")
+    print("[depth_ab] PO 目視で「立体感 vs 似度」(tiling_off が本命)。判定は PO(cos 不使用)。")
+    return {"ok": True, "out_dir": out_dir, "results": results, "grids": grids,
+            "refs": ref_list, "seeds": seed_list, "conds": cond_names}
 
 
 # ============================================================================

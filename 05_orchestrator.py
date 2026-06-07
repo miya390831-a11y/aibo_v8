@@ -269,6 +269,7 @@ class GenerationResult:
     ip_adapter_weight: float = 0.0
     controlnet_weight: float = 0.0
     pulid_used: bool = False
+    pulid_degraded: bool = False   # 観測性(RECON-019): PuLID→素Flux 縮退の検出(挙動不変・ログ/フラグのみ)
     upscale_used: bool = False
     phase3_applied: bool = False
     phase3_bypass_triggered: bool = False
@@ -299,6 +300,7 @@ class GenerationResult:
             "ip_adapter_weight": self.ip_adapter_weight,
             "controlnet_weight": self.controlnet_weight,
             "pulid_used": self.pulid_used,
+            "pulid_degraded": self.pulid_degraded,
             "upscale_used": self.upscale_used,
             "phase3_applied": self.phase3_applied,
             "phase3_bypass_triggered": self.phase3_bypass_triggered,
@@ -373,6 +375,7 @@ class CharacterOrchestrator:
                 pipeline_manager=self.pm,
                 sys_cfg=self.sys_cfg,
                 gfpgan_strength=getattr(cfg_mod, "GFPGAN_STRENGTH", 0.35),
+                gfpgan_blend=getattr(cfg_mod, "GFPGAN_BLEND", 1.0),  # 立体感 Step1: 既定 1.0=後退ゼロ
                 fill_denoising=getattr(cfg_mod, "FILL_DENOISING", 0.25),
                 angle_bypass_yaw_deg=getattr(cfg_mod, "ANGLE_BYPASS_YAW_DEG", 35.0),
                 face_mask_feather_px=getattr(cfg_mod, "FACE_MASK_FEATHER_PX", 21),
@@ -435,6 +438,7 @@ class CharacterOrchestrator:
                 f"   {gen_cfg.width}×{gen_cfg.height} · "
                 f"steps={gen_cfg.resolved_steps(self.strategy, hyper_flux_enabled=self.sys_cfg.enable_hyper_flux)}"
             )
+            logger.info(f"[OBS-B] enable_hyper_flux={self.sys_cfg.enable_hyper_flux} / _hyper_flux_loaded={getattr(self.pm, '_hyper_flux_loaded', None)} / steps={gen_cfg.resolved_steps(self.strategy, hyper_flux_enabled=self.sys_cfg.enable_hyper_flux)}")
             logger.info("=" * 60)
 
             # ─── Phase 2 v2 NEW: ACE++ LoRA 動的 scale 切替 (2026-05-06) ──
@@ -496,8 +500,34 @@ class CharacterOrchestrator:
             else:
                 id_cfg_for_extraction = id_cfg
 
+            # ─── 観測リセット (IMPL-005 · RECON-006c 案1) ───
+            # 共有 extractor に残る前回痕跡を生成の頭で消す。手動 extract の成功が
+            # UI 生成の失敗痕跡を上書きする順序汚染を断ち、[OBS-SUMMARY] が
+            # その生成の真値だけを反映するようにする(観測性のみ・核非接触)。
+            _ext_reset = getattr(self.ie, "pulid_extractor", None)
+            if _ext_reset is not None:
+                _ext_reset._last_extract_error = None
+                _ext_reset._last_face_count = None
+
             # ─── 3. Identity データ準備 ───
             identity_data = self.ie.prepare(id_cfg_for_extraction)
+
+            # ─── 原画リトライ (IMPL-007 · RECON-006 本命A) ───
+            # snipe 後画像で顔未検出(id_embeds 無)の時、snipe 前の余白あり原画像で
+            # 1回だけ再 prepare。UI のドアップ + snipe 二重クロップで顔が画面いっぱいになり
+            # antelopev2(SCRFD)がマージン不足で未検出になる事故への保険(UI/API 両方を守る)。
+            # PuLID 核・prepare/extract のロジックは不変。どの画像で呼ぶかだけを変える。
+            if "id_embeds" not in identity_data and id_cfg.reference_image is not None:
+                logger.warning("[IMPL-007] extract が None。snipe 前の原画像でリトライします")
+                id_cfg_retry = IdentityConfig(**asdict(id_cfg))   # 既存のコピー作法(487/495)を踏襲
+                id_cfg_retry.reference_image = id_cfg.reference_image   # snipe していない原画(余白あり)
+                identity_data_retry = self.ie.prepare(id_cfg_retry)
+                if "id_embeds" in identity_data_retry:
+                    identity_data = identity_data_retry
+                    logger.info("[IMPL-007] ✅ 原画リトライで id_embeds 取得成功")
+                else:
+                    logger.warning("[IMPL-007] 原画リトライでも顔未検出。PuLID 無しで継続")
+
             result.pulid_used = "id_embeds" in identity_data
             result.pulid_weight = identity_data.get("pulid_weight", 0.0)
             result.ip_adapter_weight = identity_data.get("ip_weight", 0.0)
@@ -513,6 +543,28 @@ class CharacterOrchestrator:
                 if hasattr(self.pm, "_wrap_transformer_forward_for_cn"):
                     self.pm._wrap_transformer_forward_for_cn(force_reset=True)
                     logger.info("🔧 [Phase 2 v2] post-attach wrap 再設置完了")
+
+            logger.info(f"[OBS-C] pulid_used={result.pulid_used} / id_embeds={'有' if 'id_embeds' in identity_data else '無'} / faces_detected={getattr(getattr(self.ie, 'pulid_extractor', None), '_last_face_count', 'n/a')}")
+
+            # ─── 動的 VAE tiling ガード(Step1.6 / RECON-020・必須A)───
+            #   フラグ VAE_TILING_GUARD=True 時のみ・env 明示が無い時だけ、解像度で自動切替:
+            #   max(W,H) > 1536 → ON(whole-frame decode の OOM 回避)/ ≤1536 → OFF(高周波=立体感)。
+            #   素朴グローバル False フリップは共有 VAE + 最大2048 で OOM(本番500)→ 禁止(RECON-020 §4)。
+            #   env を書かない _apply_vae_tiling_live で live vae 直叩き(env 明示 > 自動 を保つ)。
+            _cfgm = import_module("01_config")
+            if getattr(_cfgm, "VAE_TILING_GUARD", False):
+                if os.environ.get("AIBO_VAE_TILING") is None:
+                    _pmm = import_module("04_pipeline_manager")
+                    _long = max(int(gen_cfg.width), int(gen_cfg.height))
+                    _tiling_on = _long > 1536
+                    _applied = _pmm._apply_vae_tiling_live(_tiling_on)
+                    logger.info(
+                        f"[VAE][guard] long={_long} → tiling="
+                        f"{'ON(>1536·OOM回避)' if _tiling_on else 'OFF(≤1536·品質)'} "
+                        f"(live反映={_applied})"
+                    )
+                else:
+                    logger.info("[VAE][guard] env AIBO_VAE_TILING 明示あり → 自動ガード skip(明示優先)")
 
             # ─── 5. Pass 1: txt2img ───
             t0_p1 = time.perf_counter()
@@ -641,12 +693,49 @@ class CharacterOrchestrator:
             # ─── 9. Phase 4: 後始末 ───
             try:
                 self.ie.detach_from_pipeline(self.pm.pipe_base)
-            except Exception:
-                pass
+            except Exception as _detach_err:
+                # RECON-019: 空ハンドラ(厳守違反)をやめ、何が落ちたかを観測可能に(挙動は不変)
+                logger.warning(
+                    f"⚠️ [Orchestrator] detach_from_pipeline 失敗(後始末・生成は完了済): "
+                    f"{type(_detach_err).__name__}: {_detach_err}"
+                )
             self._flush_vram()
 
             result.elapsed_total_sec = time.perf_counter() - t0_total
             logger.info(f"⏱ TOTAL: {result.elapsed_total_sec:.1f}s")
+
+        # ─── OBS 自動サマリ (IMPL-004 · 点検くろうど段階1) ───
+        # 生成のたびに観測値を1ブロック出力。show_obs() 手打ち不要・UI 生成でも見える。
+        # 観測性のみ(核不変)。getattr ベースでこのブロック自身は生成を壊さない。
+        _ext = getattr(self.ie, "pulid_extractor", None)
+        _extract_err = getattr(_ext, "_last_extract_error", None)
+        _init_err = getattr(_ext, "_last_init_error", None)
+        _pipe_cls = (
+            self.pm.status().get("pipe_base_class")
+            if hasattr(self.pm, "status")
+            else type(getattr(self.pm, "pipe_base", None)).__name__
+        )
+        logger.info("─" * 60)
+        logger.info("[OBS-SUMMARY] 生成時 自動観測サマリ")
+        logger.info(f"  pipe_base_class : {_pipe_cls}")
+        # RECON-019: PuLID→素Flux 縮退(外国人化の再発口)を観測可能に(挙動は変えない)
+        result.pulid_degraded = bool(getattr(self.pm, "_pulid_degraded", False))
+        logger.info(
+            f"  pulid_degraded  : "
+            f"{'⚠️ True(素Flux縮退=外国人化の口)' if result.pulid_degraded else 'False'}"
+        )
+        logger.info(
+            f"  hyper_flux      : enable={self.sys_cfg.enable_hyper_flux}"
+            f" / loaded={getattr(self.pm, '_hyper_flux_loaded', None)}"
+            f" / steps_pass1={result.steps_pass1}"
+        )
+        logger.info(f"  id_embeds       : {'有✅' if result.pulid_used else '無⚠️'}")
+        if not result.pulid_used:
+            # RECON-005 FIX-1: 「無」だけでなく「なぜ無か」を併記
+            logger.info(f"    ↳ 失敗理由    : extract={_extract_err or 'なし'} / init={_init_err or 'なし'}")
+        # RECON-005 FIX-2: faces_detected は single-ref では無意味 · 判断に使わせない
+        logger.info(f"  faces_detected  : n/a(single-ref)")
+        logger.info("─" * 60)
 
         return result
 

@@ -88,6 +88,14 @@ ANGLE_BYPASS_YAW_DEG: float = 35.0
 FACE_MASK_FEATHER_PX: int = 21
 FACE_MASK_MARGIN_RATIO: float = 0.20
 
+# ─── 立体感 Step1.6(RECON-020): VAE tiling 動的ガード ───
+# True で「Pass1 直前に解像度判定で VAE tiling を自動 on/off」:
+#   max(W,H) > 1536 → ON(whole-frame decode の OOM 回避)/ ≤1536 → OFF(高周波=立体感を残す)。
+# 素朴な env グローバル False フリップは共有 VAE + 最大2048 で OOM(本番500)になるため使わない。
+# env AIBO_VAE_TILING の明示指定はこのガードに優先(明示 > 自動)。
+# 既定 False = 現状維持(後退ゼロ)。本番フリップは確認スイープ合格後に司令部が True にする。
+VAE_TILING_GUARD: bool = True
+
 # ─── Phase 3 用プロンプト ───
 NEGATIVE_PROMPT_BASE: str = (
     "smooth skin, plastic, cgi, airbrushed, doll-like, "
@@ -327,12 +335,14 @@ class IdentityConfig:
     reference_images: Optional[list[Image.Image]] = None
 
     # PuLID (v0.9.0 · Identity 優先版)
-    pulid_weight: float = 0.7  # v7.4.0 Phase 1 実機確定値 (PO 探索 · 2026-05-06)
-                               # ※ 単独運用時 (Stage 4-D-2 only) は 2.5 が黄金値
-                               # ※ リサーチ先生 3-A 推奨は 0.85 だったが、PO 実機探索で
-                               #    PuLID 0.7/0.85/1.0 すべて大差なし (エネルギー総量一定の法則)
-                               # ※ プラスチック化リスク最小化のため 0.7 採用
-                               # ※ IP-Adapter 0.6 + ACE++ 0.6 + PuLID 0.7 の 3 段並列構成
+    pulid_weight: float = 0.6  # OP-CHANGE-001 (2026-06-07): 3 段並列既定 0.7→0.6
+                               # ※ 3 段並列既定 = 0.6。D1 応答曲線 + PO 目視で決定:
+                               #    cos 最適 = 1.0 だが焼け/プラスチック域 → 見た目最適 = 0.6
+                               #    (似てる × 自然の両取り点)。商用 React→FastAPI の既定。
+                               # ※ 単独運用時 (Stage 4-D-2 only) は 2.5 が黄金値(据置)
+                               # ※ 旧既定 0.7 = v7.4.0 Phase 1 実機確定値 (PO 探索 · 2026-05-06)。
+                               #    PuLID 0.7/0.85/1.0 大差なし (エネルギー総量一定の法則)
+                               # ※ IP-Adapter 0.75 + style-LoRA(第3レバー)0.6 + PuLID 0.6 の 3 段並列構成
     # 2026-05-23: O3 コンサル + 実機検証で Setting A に刷新
     pulid_sigma_start: float = 0.25           # 旧 0.2 → 0.25
     pulid_sigma_end: float = 0.90             # 旧 1.0 → 0.90

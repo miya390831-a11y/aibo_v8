@@ -37,3 +37,12 @@ logs/*.lock
 logs/errors/*.json
 logs/errors/*.md
 !logs/errors/.gitkeep
+
+# === errorfix 半自動ループ ===
+.errorfix/incoming/
+.errorfix/applied/
+.errorfix/lock
+.errorfix/state.json
+.errorfix/*.patch
+logs/errorfix_inbox/
+.env
