@@ -1885,8 +1885,10 @@ def depth_ab_run(ref=None, seed=0, out_dir="/content/drive/MyDrive/aibo_v7/depth
 _BODYCN_ARMS = {
     # arm: (cn_on, cn_pose_weight, cn_pose_guidance_end)
     "baseline":   (False, None, None),   # CN off = 素の _run_pass1(現状 PORTRAIT)
+    "pose_cn_03": (True,  0.3,  0.6),     # 顔ドリフト緩和 weight ladder(低)
+    "pose_cn_04": (True,  0.4,  0.6),     # 顔ドリフト緩和 weight ladder(中)
     "pose_cn_06": (True,  0.6,  0.6),     # pose 単体・weight 0.6(PuLID 安全側・RECON-024 D6)
-    "pose_cn_09": (True,  0.9,  0.6),     # pose 単体・weight 0.9(Union-Pro 公式上限側)
+    "pose_cn_09": (True,  0.9,  0.6),     # pose 単体・weight 0.9(Union-Pro 公式上限側・既定外)
 }
 _BODYCN_PROMPT = (
     "full body shot, standing pose, head to toe, entire body visible, "
@@ -1988,7 +1990,7 @@ def _bodycn_parse_obs(lines):
 
 
 def bodycn_ab_run(face_ref, body_ref, seeds=(0,),
-                  arms=("baseline", "pose_cn_06", "pose_cn_09"),
+                  arms=("baseline", "pose_cn_03", "pose_cn_04", "pose_cn_06"),
                   out_dir="/content/drive/MyDrive/aibo_v7/bodycn_ab",
                   prompt=_BODYCN_PROMPT, width=832, height=1216,
                   orch=None, show=True):
