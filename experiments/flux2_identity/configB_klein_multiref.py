@@ -39,6 +39,32 @@ from PIL import Image, ImageDraw, ImageFont
 
 
 # ------------------------------------------------------------
+# ゼロ手動化の既定（指示 2026-06-07）: 既存資産を read-only 参照し、司令部の手配置を消す。
+#   --face-refs / --prompts で上書き可。書き込みは scratch のみ（本番 Drive 非書込）。
+# ------------------------------------------------------------
+# 既定 face-refs = 既存の実験 face-ref 置き場（RECON-015 が antelopev2 で使った実 ref 群: easy/hard）。
+#   ※ 本番 config に「顔 id-ref の固定ディレクトリ定数」は無い（face_ref は実行時パス渡し設計）。
+#     これは現存する最有力の実 ref 資産＝統括の提案既定。正規の本人セットが別なら司令部が --face-refs で指定。
+#     第1走行の狙いは「Klein がそもそも顔を保てるか」を安く問うこと（同一人物 ref かは self-check が点検）。
+DEFAULT_FACE_REFS = "/content/drive/MyDrive/aibo_v7/recon015_refs"  # read-only
+
+# 既定プロンプト = プロジェクトの PORTRAIT/COORDINATE/SITUATION プリセット由来（01_config.py _MODE_PRESETS）。
+DEFAULT_PROMPTS = [
+    # PORTRAIT（全身・スタジオ）
+    "full body shot, standing pose, head to toe, entire body visible including feet, "
+    "soft key light, 50mm lens, professional fashion photography, clean studio background, "
+    "cinematic, sharp focus",
+    # COORDINATE（全身ファッション）
+    "full body fashion shot, standing pose, fitted white top, slim skinny jeans, white sneakers, "
+    "neutral studio background, soft fashion lighting, natural pose, photographic, cinematic",
+    # SITUATION（環境光・lifestyle）
+    "walking through a park at golden hour, warm sunlight, 35mm handheld, lifestyle",
+    # 顔寄り（identity を素で見る近接ショット）
+    "upper body portrait, looking at camera, natural soft light, 85mm lens, sharp focus on face",
+]
+
+
+# ------------------------------------------------------------
 # パス/境界ガード — 本番フォルダへの書き込みを物理的に拒否
 # ------------------------------------------------------------
 PRODUCTION_MARKERS = ("aibo_v7", "AIBOV7")  # 本番リポ/Drive フォルダ名
@@ -313,28 +339,29 @@ def run(args):
     autofix = JsonlLog(os.path.join(scratch, "autofix_log.jsonl"))
     findings_path = os.path.join(scratch, "findings.md")
 
-    # --- 入力 ---
+    # --- 入力（ゼロ手動化: face-refs/prompts は既定で既存資産/プリセットを参照） ---
     char_refs = load_images_from_dir(args.ref_dir)
-    baselines = load_images_from_dir(args.baseline_dir)
-    prompts = load_prompts(args.prompts)
+    baselines = load_images_from_dir(args.baseline_dir)  # 第1走行は通常 空（baseline スキップ）
+    if args.prompts:
+        prompts = load_prompts(args.prompts)
+        prompt_src = args.prompts
+    else:
+        prompts = list(DEFAULT_PROMPTS)
+        prompt_src = "DEFAULT_PROMPTS（プリセット由来）"
 
-    log(f"入力: char_ref={len(char_refs)} / baseline={len(baselines)} / prompts={len(prompts)}")
+    log(f"入力: face_refs={len(char_refs)} (<-{args.ref_dir}) / "
+        f"baseline={len(baselines)}{'（第1走行スキップ）' if not baselines else ''} / "
+        f"prompts={len(prompts)} (<-{prompt_src})")
 
-    # --- 入力未投入は「成立しない」ではなく「司令部投入待ち」。正直に止める（捏造しない） ---
-    missing = []
+    # --- face-refs は既定で既存資産を read-only 参照。空＝パス誤り/資産消失＝正直に止める（捏造しない） ---
     if not char_refs:
-        missing.append("キャラ顔 ref (--ref-dir)")
-    if not prompts:
-        missing.append("評価プロンプト (--prompts)")
-    if missing:
-        msg = ("入力が未投入のため本走行は保留（skeleton は配置済み）。\n"
-               "司令部が以下を投入後に再実行してください:\n  - " + "\n  - ".join(missing) +
-               "\n  - baseline サンプル (--baseline-dir) は任意（基準バー比較用）")
+        msg = (f"既定/指定の face-refs に顔画像が無い: {args.ref_dir}\n"
+               f"  → 本来 --self-check が本走行の前に捕まえる層。\n"
+               f"  → 正規の本人 ref セットを --face-refs で指定して再実行してください。")
         log("⏸ " + msg.replace("\n", " "))
         with open(findings_path, "w", encoding="utf-8") as f:
-            f.write(f"# findings(構成B) — 入力投入待ち\n\n{msg}\n")
-        # skeleton 検証だけ実施（成立性チェック）→ exit 0（保留であって失敗ではない）
-        self_check(cfg, char_refs, autofix)
+            f.write(f"# findings(構成B) — face-refs 不在\n\n{msg}\n")
+        self_check(cfg, args.ref_dir, autofix)
         return 0
 
     # --- スコアラー & 参照埋め込み（mean ref / best ref 両方） ---
@@ -526,17 +553,58 @@ def _summarize(cosines, n_ok, n_fail, n_noface, total_sec, dtype, cfg):
     )
 
 
-def self_check(cfg, char_refs, autofix):
+def self_check(cfg, face_refs_path, autofix):
     """
-    成立性の軽量チェック（GPU 重み DL なし）:
-      1. Flux2KleinPipeline が import できるか（diffusers>=0.38）
-      2. repo がアクセス可能か（huggingface_hub.model_info・DL しない）
-      3. スコアラーが load でき、ref があれば顔検出できるか
-    → skeleton が配線として成立しているかだけ確認。identity 結果は名乗らない。
+    成立性 + 入力健全性の軽量チェック（GPU 重み DL なし）。高い本走行の前に安く確実に止める層:
+      1. 既定/指定 face-refs パスが存在し、顔画像があるか（パス誤り・資産消失を捕捉）
+      2. 各 ref で本番識別器(antelopev2)が顔検出できるか（不正画像を捕捉）
+      3. ref 同士が同一人物っぽいか（multi-ref は1人物前提・ペアワイズ cos<0.5 で別人混在を警告）
+      4. Flux2KleinPipeline が import できるか（diffusers>=0.38）
+      5. repo にアクセス可能か（huggingface_hub.model_info・DL しない）
+    → identity の合否は名乗らない。あくまで「本走行に進んでよい配線か」の点検。
     """
-    log("=== SELF-CHECK（成立性・軽量）===")
+    log("=== SELF-CHECK（成立性 + 入力健全性・軽量）===")
     ok = True
 
+    # 1+2+3: face-refs の存在・顔検出・同一人物性
+    refs = load_images_from_dir(face_refs_path)
+    if not os.path.isdir(face_refs_path):
+        ok = False
+        log(f"  [NG] face-refs ディレクトリが無い: {face_refs_path}")
+    elif not refs:
+        ok = False
+        log(f"  [NG] face-refs に画像が無い: {face_refs_path}")
+    else:
+        log(f"  [..] face-refs: {len(refs)} 枚 @ {face_refs_path}")
+        try:
+            sc = ArcFaceScorer()
+            embs = []
+            for name, im in refs:
+                e = sc.embed(im)
+                log(f"     - {name}: {'顔検出OK' if e is not None else '顔未検出 NG'}")
+                if e is None:
+                    ok = False
+                else:
+                    embs.append((name, e))
+            if len(embs) >= 2:  # multi-ref は1人物前提。別人混在を安く検出。
+                lows = []
+                for i in range(len(embs)):
+                    for j in range(i + 1, len(embs)):
+                        c = ArcFaceScorer.cosine(embs[i][1], embs[j][1])
+                        if c < 0.5:
+                            lows.append((embs[i][0], embs[j][0], c))
+                if lows:
+                    log("  [WARN] ref 同士の類似が低いペアあり（別人混在の疑い・multi-ref は1人物前提）:")
+                    for a, b, c in lows[:6]:
+                        log(f"        {a} vs {b}: cos={c:.3f}")
+                    log("        → 同一人物の ref だけに絞るか、--face-refs を本人セットへ。")
+                else:
+                    log("  [OK] ref 同士は同一人物として整合（全ペア cos>=0.5）")
+        except Exception as e:
+            ok = False
+            log(f"  [NG] スコアラー初期化/検出失敗: {e}")
+
+    # 4: import
     try:
         from diffusers import Flux2KleinPipeline  # noqa: F401
         log("  [OK] diffusers.Flux2KleinPipeline import 可")
@@ -544,6 +612,7 @@ def self_check(cfg, char_refs, autofix):
         ok = False
         log(f"  [NG] Flux2KleinPipeline import 不可（diffusers>=0.38 要）: {e}")
 
+    # 5: repo アクセス（DL しない）
     try:
         from huggingface_hub import model_info
         info = model_info(cfg.repo_id)
@@ -552,29 +621,19 @@ def self_check(cfg, char_refs, autofix):
         ok = False
         log(f"  [NG] repo にアクセスできない（gate/名称/トークン要確認）: {cfg.repo_id}: {e}")
 
-    if char_refs:
-        try:
-            sc = ArcFaceScorer()
-            e0 = sc.embed(char_refs[0][1])
-            log(f"  [{'OK' if e0 is not None else 'NG'}] スコアラー load & ref 顔検出: "
-                f"{'検出' if e0 is not None else '未検出'}")
-            ok = ok and (e0 is not None)
-        except Exception as e:
-            ok = False
-            log(f"  [NG] スコアラー初期化失敗: {e}")
-    else:
-        log("  [--] ref 未投入 → 顔検出チェックは保留")
-
-    autofix.append({"stage": "self_check", "established": ok})
-    log(f"=== SELF-CHECK: {'成立しうる' if ok else '要対応あり（上記 NG 参照）'} ===")
+    autofix.append({"stage": "self_check", "established": ok, "face_refs": face_refs_path})
+    log(f"=== SELF-CHECK: {'PASS（本走行へ進んでよい）' if ok else 'FAIL（上記 NG を解消してから本走行）'} ===")
     return ok
 
 
 def build_argparser():
     p = argparse.ArgumentParser(description="構成B: FLUX.2 Klein multi-reference identity 検証（CP付き）")
-    p.add_argument("--ref-dir", default="", help="キャラ顔 ref ディレクトリ（読取専用・司令部投入）")
-    p.add_argument("--baseline-dir", default="", help="現行パイプライン出力サンプル（基準バー・任意）")
-    p.add_argument("--prompts", default="", help="評価プロンプト（.txt 1行1件 / .json list）")
+    p.add_argument("--face-refs", "--ref-dir", dest="ref_dir", default=DEFAULT_FACE_REFS,
+                   help=f"キャラ顔 ref ディレクトリ（読取専用・既定=既存資産 {DEFAULT_FACE_REFS}）")
+    p.add_argument("--baseline-dir", default="",
+                   help="現行パイプライン出力サンプル（基準バー・第1走行は通常スキップ＝空）")
+    p.add_argument("--prompts", default="",
+                   help="評価プロンプト（.txt 1行1件 / .json list）。未指定なら PORTRAIT 系プリセット既定")
     p.add_argument("--scratch", default="/content/drive/MyDrive/aibo_lab/flux2_identity/run",
                    help="出力/CP 先（★本番 aibo_v7 配下は不可）")
     p.add_argument("--repo-id", default=Config.repo_id)
@@ -597,7 +656,7 @@ def main():
         os.makedirs(args.scratch, exist_ok=True)
         assert_not_production(args.scratch, "scratch/出力先")
         af = JsonlLog(os.path.join(args.scratch, "autofix_log.jsonl"))
-        return 0 if self_check(cfg, load_images_from_dir(args.ref_dir), af) else 3
+        return 0 if self_check(cfg, args.ref_dir, af) else 3
     return run(args)
 
 
