@@ -108,6 +108,18 @@ class ArcFaceScorer:
     def __init__(self, model_name="antelopev2"):
         self.model_name = model_name
         self._app = None
+        self.provider = None  # 実効 provider（CUDA か CPU か）
+
+    def _active_providers(self):
+        """ロード済みモデルの session から実際に効いている provider を取り出す（沈黙フォールバック検出用）。"""
+        try:
+            for m in (self._app.models or {}).values():
+                sess = getattr(m, "session", None)
+                if sess is not None:
+                    return sess.get_providers()
+        except Exception as e:
+            return f"<unknown: {repr(e)}>"
+        return "<no session>"
 
     def _ensure(self):
         if self._app is not None:
@@ -117,13 +129,36 @@ class ArcFaceScorer:
         hf_cache = os.environ.get("HF_HOME", "/root/.cache/huggingface")
         root = os.path.join(hf_cache, "insightface")
         log(f"InsightFace({self.model_name}) root={root}")
-        app = FaceAnalysis(
-            name=self.model_name,
-            root=root,
-            providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
-        )
-        app.prepare(ctx_id=0, det_size=(640, 640))
-        self._app = app
+
+        def _build(providers, ctx_id):
+            app = FaceAnalysis(name=self.model_name, root=root, providers=providers)
+            app.prepare(ctx_id=ctx_id, det_size=(640, 640))
+            return app
+
+        # CUDA を試し、失敗したら CPU に落とす。
+        #   antelopev2 の ArcFace 推論は決定的＝CPU/GPU で embedding 同一（数値誤差レベル）→ 本番比較性は保つ。
+        #   GPU(CUDA)は FLUX 生成に温存。L4 等で onnxruntime-gpu の CUDA provider が初期化失敗する事故への保険。
+        try:
+            self._app = _build(["CUDAExecutionProvider", "CPUExecutionProvider"], ctx_id=0)
+            eff = self._active_providers()
+            self.provider = eff
+            if isinstance(eff, list) and "CUDAExecutionProvider" in eff:
+                log(f"  provider(実効)= {eff}（CUDA）")
+            else:
+                # 例外は出ないが CUDA が効いていない沈黙フォールバック。握り潰さず明示。
+                log(f"  ⚠ CUDA 要求だが実効 provider= {eff}（onnxruntime が CPU に沈黙フォールバック）")
+        except Exception as e:
+            # 握り潰さない: repr + traceback を必ず出す（空メッセージ＝デバッグ不能＝可観測性違反）。
+            log(f"  ⚠ CUDA provider 初期化失敗 → CPU にフォールバック: {repr(e)}")
+            log(traceback.format_exc())
+            try:
+                self._app = _build(["CPUExecutionProvider"], ctx_id=-1)
+                self.provider = self._active_providers()
+                log(f"  provider(実効)= {self.provider}（CPU フォールバック・embedding 同一＝本番比較性 維持）")
+            except Exception as e2:
+                log(f"  ✖ CPU フォールバックも失敗: {repr(e2)}")
+                log(traceback.format_exc())
+                raise
 
     def embed(self, image: Image.Image):
         """最大顔の ArcFace 正規化埋め込み(512d, 単位ノルム)。顔無し→None。"""
@@ -216,9 +251,9 @@ def prepare_scorer(scorer_name, autofix, skip_deps=False):
     ensure_scorer_deps(autofix, skip=skip_deps)
     scorer = ArcFaceScorer(scorer_name)
     scorer._ensure()  # ← ここで antelopev2 モデルが HF_HOME/insightface/models/ に prefetch される
-    autofix.append({"stage": "prefetch", "model": scorer_name,
+    autofix.append({"stage": "prefetch", "model": scorer_name, "provider": scorer.provider,
                     "hf_home": os.environ.get("HF_HOME", "/root/.cache/huggingface")})
-    log(f"{scorer_name} prefetch 完了（本番と同一パス/モデル＝cosine 比較可能）")
+    log(f"{scorer_name} prefetch 完了（本番と同一パス/モデル＝cosine 比較可能 / provider={scorer.provider}）")
     return scorer
 
 
@@ -687,7 +722,9 @@ def self_check(cfg, face_refs_path, autofix, skip_deps=False):
                     log("  [OK] ref 同士は同一人物として整合（全ペア cos>=0.5）")
         except Exception as e:
             ok = False
-            log(f"  [NG] スコアラー初期化/検出失敗: {e}")
+            # 空メッセージで握り潰さない: repr + traceback を必ず出す（可観測性）。
+            log(f"  [NG] スコアラー初期化/検出失敗: {repr(e)}")
+            log(traceback.format_exc())
 
     # 4: import
     try:
