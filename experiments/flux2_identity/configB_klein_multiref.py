@@ -27,6 +27,7 @@
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 import traceback
@@ -142,6 +143,83 @@ class ArcFaceScorer:
         a = a / (np.linalg.norm(a) + 1e-8)
         b = b / (np.linalg.norm(b) + 1e-8)
         return float(np.dot(a, b))
+
+
+def _ver_lt(v, target=(2, 1, 0)):
+    """'2.0.1' < target を packaging 無しで判定（失敗時は True=要更新側に倒す）。"""
+    try:
+        parts = tuple(int(x) for x in str(v).split("+")[0].split(".")[:3])
+        return parts < target
+    except (ValueError, AttributeError):
+        return True
+
+
+def ensure_scorer_deps(autofix, skip=False):
+    """
+    識別器(insightface/onnxruntime-gpu)を **本番(02_colab_setup)と同じ方針** で自動導入。
+    司令部が ① コマンドを再実行するだけで通るように、ここで自己ブートストラップする。
+
+    本番一致の根拠（cosine を本番と比較可能に保つため）:
+      - insightface / onnxruntime-gpu は **バージョン非ピン**（02_colab_setup.py:271,274 が None）。
+        ＝本番と同じく「その時点の latest」を入れる。勝手な pin は本番との乖離を生むので張らない。
+      - **numpy>=2.1.0** を保証（02_colab_setup.py:252 の insightface/scipy 互換要件 _center/_blas）。
+      - 既に充足なら pip を呼ばない（C 拡張 ABI 不整合→自動再起動ループ回避。本番 PROTECT_IF_SATISFIED と同思想）。
+    """
+    if skip:
+        log("scorer deps: --skip-deps 指定 → 自動導入を skip")
+        return
+
+    import importlib
+
+    need = []
+    # numpy 床（既に満たすなら触らない＝ABI 再起動回避）
+    try:
+        import numpy as _np
+        if _ver_lt(_np.__version__, (2, 1, 0)):
+            need.append("numpy>=2.1.0")
+    except Exception:
+        need.append("numpy>=2.1.0")
+    # insightface
+    try:
+        importlib.import_module("insightface")
+    except Exception:
+        need.append("insightface")
+    # onnxruntime（import 名は -gpu でも 'onnxruntime'）。無ければ GPU ビルドを入れる。
+    try:
+        importlib.import_module("onnxruntime")
+    except Exception:
+        need.append("onnxruntime-gpu")
+
+    if not need:
+        log("scorer deps: 充足（insightface / onnxruntime / numpy>=2.1.0）→ pip skip")
+        autofix.append({"stage": "deps", "action": "skip(satisfied)"})
+        return
+
+    log(f"scorer deps 自動導入（本番方針=非ピン+numpy床）: {need}")
+    cmd = [sys.executable, "-m", "pip", "install", "-q", *need]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    tail = (proc.stdout or "")[-800:] + (proc.stderr or "")[-800:]
+    autofix.append({"stage": "deps", "installed": need, "rc": proc.returncode,
+                    "cmd": " ".join(cmd), "log_tail": tail.strip(), "meaning_changed": False})
+    if proc.returncode != 0:
+        # 黙って続行しない。識別器が入らなければ cosine は測れない＝正直に止める材料。
+        raise RuntimeError(f"scorer deps の pip install 失敗 (rc={proc.returncode}):\n{tail}")
+    log("scorer deps 導入完了")
+
+
+def prepare_scorer(scorer_name, autofix, skip_deps=False):
+    """
+    deps 自動導入 → スコアラー構築 → **antelopev2 を prefetch**（本番と同一の DL 経路で展開）。
+    prefetch は FaceAnalysis(name=antelopev2, root=HF_HOME/insightface).prepare() を一度叩くだけ＝
+    08_face_refiner.py と同一コードパス。これで cosine が本番と同一モデル・同一前処理で算出される。
+    """
+    ensure_scorer_deps(autofix, skip=skip_deps)
+    scorer = ArcFaceScorer(scorer_name)
+    scorer._ensure()  # ← ここで antelopev2 モデルが HF_HOME/insightface/models/ に prefetch される
+    autofix.append({"stage": "prefetch", "model": scorer_name,
+                    "hf_home": os.environ.get("HF_HOME", "/root/.cache/huggingface")})
+    log(f"{scorer_name} prefetch 完了（本番と同一パス/モデル＝cosine 比較可能）")
+    return scorer
 
 
 # ============================================================
@@ -361,11 +439,11 @@ def run(args):
         log("⏸ " + msg.replace("\n", " "))
         with open(findings_path, "w", encoding="utf-8") as f:
             f.write(f"# findings(構成B) — face-refs 不在\n\n{msg}\n")
-        self_check(cfg, args.ref_dir, autofix)
+        self_check(cfg, args.ref_dir, autofix, skip_deps=args.skip_deps)
         return 0
 
-    # --- スコアラー & 参照埋め込み（mean ref / best ref 両方） ---
-    scorer = ArcFaceScorer(args.scorer)
+    # --- スコアラー（deps 自動導入 + antelopev2 prefetch）& 参照埋め込み ---
+    scorer = prepare_scorer(args.scorer, autofix, skip_deps=args.skip_deps)
     ref_embs = []
     for name, im in char_refs:
         e = scorer.embed(im)
@@ -553,9 +631,9 @@ def _summarize(cosines, n_ok, n_fail, n_noface, total_sec, dtype, cfg):
     )
 
 
-def self_check(cfg, face_refs_path, autofix):
+def self_check(cfg, face_refs_path, autofix, skip_deps=False):
     """
-    成立性 + 入力健全性の軽量チェック（GPU 重み DL なし）。高い本走行の前に安く確実に止める層:
+    成立性 + 入力健全性の軽量チェック。高い本走行の前に安く確実に止める層:
       1. 既定/指定 face-refs パスが存在し、顔画像があるか（パス誤り・資産消失を捕捉）
       2. 各 ref で本番識別器(antelopev2)が顔検出できるか（不正画像を捕捉）
       3. ref 同士が同一人物っぽいか（multi-ref は1人物前提・ペアワイズ cos<0.5 で別人混在を警告）
@@ -563,8 +641,15 @@ def self_check(cfg, face_refs_path, autofix):
       5. repo にアクセス可能か（huggingface_hub.model_info・DL しない）
     → identity の合否は名乗らない。あくまで「本走行に進んでよい配線か」の点検。
     """
-    log("=== SELF-CHECK（成立性 + 入力健全性・軽量）===")
+    log("=== SELF-CHECK（成立性 + 入力健全性）===")
     ok = True
+
+    # 0: 識別器 deps を本番方針で自動導入（refs の有無に関わらず・冪等）。
+    try:
+        ensure_scorer_deps(autofix, skip=skip_deps)
+    except Exception as e:
+        ok = False
+        log(f"  [NG] scorer deps 自動導入失敗: {e}")
 
     # 1+2+3: face-refs の存在・顔検出・同一人物性
     refs = load_images_from_dir(face_refs_path)
@@ -577,7 +662,7 @@ def self_check(cfg, face_refs_path, autofix):
     else:
         log(f"  [..] face-refs: {len(refs)} 枚 @ {face_refs_path}")
         try:
-            sc = ArcFaceScorer()
+            sc = prepare_scorer("antelopev2", autofix, skip_deps=skip_deps)  # deps+antelopev2 prefetch
             embs = []
             for name, im in refs:
                 e = sc.embed(im)
@@ -645,6 +730,8 @@ def build_argparser():
     p.add_argument("--max-refs", type=int, default=Config.max_refs)
     p.add_argument("--seeds", default="1234,5678,9012")
     p.add_argument("--scorer", default="antelopev2", help="本番と同じ識別器（既定 antelopev2）")
+    p.add_argument("--skip-deps", action="store_true",
+                   help="insightface/onnxruntime-gpu の自動導入を skip（既に同等環境がある時）")
     p.add_argument("--self-check", action="store_true", help="成立性の軽量チェックのみ（生成しない）")
     return p
 
@@ -656,7 +743,7 @@ def main():
         os.makedirs(args.scratch, exist_ok=True)
         assert_not_production(args.scratch, "scratch/出力先")
         af = JsonlLog(os.path.join(args.scratch, "autofix_log.jsonl"))
-        return 0 if self_check(cfg, args.ref_dir, af) else 3
+        return 0 if self_check(cfg, args.ref_dir, af, skip_deps=args.skip_deps) else 3
     return run(args)
 
 

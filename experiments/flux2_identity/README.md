@@ -16,15 +16,18 @@
 #   事前: PC で `claude setup-token` → 出た sk-ant-oat... を Colab Secrets 名 CC_OAUTH_TOKEN に登録
 %run /content/drive/MyDrive/aibo_lab/flux2_identity/colab_bootstrap.py
 
-# セル2: 依存（隔離環境推奨）+ 重みを Drive にキャッシュ
+# セル2: 生成スタックの依存 + 重みを Drive にキャッシュ
+#   ※ 識別器(insightface / onnxruntime-gpu)と antelopev2 は configB が自動導入+prefetch するので
+#     ここには書かない（本番 02_colab_setup と同じ非ピン方針＝cosine 比較可能）。
 import os
 os.environ["HF_HOME"] = "/content/drive/MyDrive/aibo_lab/hf_cache"   # ★本番フォルダではない
-!pip install -q "diffusers>=0.38" transformers accelerate safetensors \
-    insightface onnxruntime-gpu sentencepiece pillow huggingface_hub
+!pip install -q "diffusers>=0.38" transformers accelerate safetensors sentencepiece pillow huggingface_hub
 
-# セル3a: 成立性 + 入力健全性チェック（GPU 重み DL なし・速い）
+# セル3a【① コマンド】: 成立性 + 入力健全性チェック
 #   ★ゼロ手動化: face-refs/prompts は既定で既存資産/プリセットを参照。司令部の手配置 不要。
-#   self-check が「ref 存在 + 顔検出 + 同一人物性 + repo + import」を本走行の前に安く点検。
+#   ★自己ブートストラップ: insightface/onnxruntime-gpu を本番方針で自動導入し antelopev2 を prefetch
+#     （初回のみ DL で数分・2回目以降は HF_HOME キャッシュで即）。＝司令部は ① を再実行するだけで通る。
+#   self-check が「deps 導入 → ref 存在 + 顔検出 + 同一人物性 → repo → import」を本走行の前に安く点検。
 !python /content/drive/MyDrive/aibo_v7/experiments/flux2_identity/configB_klein_multiref.py \
     --self-check --scratch /content/drive/MyDrive/aibo_lab/flux2_identity/run
 
@@ -63,6 +66,7 @@ os.environ["HF_HOME"] = "/content/drive/MyDrive/aibo_lab/hf_cache"   # ★本番
 - **成立しない系は差し替えない**: `Flux2KleinPipeline` が import/load できない等は `findings.md` に正直に書いて STOP（FLUX.1 等に黙って替えない）。
 - **知覚は自分で合格と言わない**: グリッド/サマリに「👁 PO 目視」「cos≠知覚的同一性」を明記。GO/NO-GO は司令部/PO。
 - 識別器は本番と同一（`08_face_refiner.py` と同じ `FaceAnalysis(name="antelopev2")` / `normed_embedding` / cos）。
+  - **バージョン整合**: insightface / onnxruntime-gpu を **本番 02_colab_setup と同じ非ピン方針**で自動導入（`:271,274`＝`None`）＋**numpy>=2.1.0**（`:252` 互換要件）。antelopev2 は本番と同一の DL 経路（`FaceAnalysis(name="antelopev2",root=HF_HOME/insightface).prepare()`）で prefetch ＝同一モデル・同一前処理で cosine 比較可能。`--skip-deps` で自動導入を無効化可。
 
 ## 統括が PC 側で実証済み / 残る Colab 実機確認
 **実証済み（このタブで確認）:**
