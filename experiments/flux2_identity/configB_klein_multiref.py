@@ -121,13 +121,68 @@ class ArcFaceScorer:
             return f"<unknown: {repr(e)}>"
         return "<no session>"
 
-    def _ensure(self):
+    def _inspect_and_flatten_models(self, model_dir, autofix=None):
+        """
+        antelopev2 の .onnx 実体を点検し、二重ネストなら flatten（機械的 autofix）。
+        既知バグ: antelopev2.zip が <model_dir>/antelopev2/*.onnx に二重展開されるが、
+                  FaceAnalysis は <model_dir>/*.onnx 直下を見るため 'detection' in self.models が落ちる。
+        実体を必ずログに出す（見える化）。flatten したら True。
+        """
+        import glob
+        import shutil
+
+        if not os.path.isdir(model_dir):
+            log(f"  [model 点検] ディレクトリ無し: {model_dir}（DL 未完/失敗の疑い）")
+            return False
+
+        # 实体を見える化: 直下 + 1階層下を ls
+        top = sorted(os.listdir(model_dir))
+        log(f"  [model 点検] {model_dir} 直下: {top}")
+        for name in top:
+            sub = os.path.join(model_dir, name)
+            if os.path.isdir(sub):
+                log(f"        └ {name}/: {sorted(os.listdir(sub))}")
+
+        if glob.glob(os.path.join(model_dir, "*.onnx")):
+            log("  [model 点検] 直下に .onnx あり（配置は正常）")
+            return False
+
+        nested = glob.glob(os.path.join(model_dir, "*", "*.onnx"))
+        if not nested:
+            log("  [model 点検] .onnx が直下にもネストにも無い → flatten 不能（DL 失敗の疑い）")
+            return False
+
+        # flatten: ネスト先の中身を直下へ移動（二重ネスト antelopev2/antelopev2/ → antelopev2/）
+        nested_dirs = sorted({os.path.dirname(p) for p in nested})
+        moved = []
+        for nd in nested_dirs:
+            for fn in os.listdir(nd):
+                src, dst = os.path.join(nd, fn), os.path.join(model_dir, fn)
+                if os.path.exists(dst):
+                    continue
+                shutil.move(src, dst)
+                moved.append(fn)
+            try:
+                if not os.listdir(nd):
+                    os.rmdir(nd)
+            except OSError as e:
+                log(f"        （空ネスト dir 掃除 skip: {repr(e)}）")
+        log(f"  [model 点検] flatten 実行: {len(moved)} ファイルを直下へ移動 "
+            f"({[os.path.basename(d) for d in nested_dirs]} → {os.path.basename(model_dir)}/): {moved}")
+        if autofix is not None:
+            autofix.append({"stage": "flatten", "issue": "antelopev2.zip 二重ネスト",
+                            "moved": moved, "from": nested_dirs, "to": model_dir,
+                            "meaning_changed": False})
+        return bool(moved)
+
+    def _ensure(self, autofix=None):
         if self._app is not None:
             return
         from insightface.app import FaceAnalysis
 
         hf_cache = os.environ.get("HF_HOME", "/root/.cache/huggingface")
         root = os.path.join(hf_cache, "insightface")
+        model_dir = os.path.join(root, "models", self.model_name)
         log(f"InsightFace({self.model_name}) root={root}")
 
         def _build(providers, ctx_id):
@@ -135,30 +190,47 @@ class ArcFaceScorer:
             app.prepare(ctx_id=ctx_id, det_size=(640, 640))
             return app
 
-        # CUDA を試し、失敗したら CPU に落とす。
-        #   antelopev2 の ArcFace 推論は決定的＝CPU/GPU で embedding 同一（数値誤差レベル）→ 本番比較性は保つ。
-        #   GPU(CUDA)は FLUX 生成に温存。L4 等で onnxruntime-gpu の CUDA provider が初期化失敗する事故への保険。
-        try:
-            self._app = _build(["CUDAExecutionProvider", "CPUExecutionProvider"], ctx_id=0)
-            eff = self._active_providers()
-            self.provider = eff
-            if isinstance(eff, list) and "CUDAExecutionProvider" in eff:
-                log(f"  provider(実効)= {eff}（CUDA）")
-            else:
-                # 例外は出ないが CUDA が効いていない沈黙フォールバック。握り潰さず明示。
-                log(f"  ⚠ CUDA 要求だが実効 provider= {eff}（onnxruntime が CPU に沈黙フォールバック）")
-        except Exception as e:
-            # 握り潰さない: repr + traceback を必ず出す（空メッセージ＝デバッグ不能＝可観測性違反）。
-            log(f"  ⚠ CUDA provider 初期化失敗 → CPU にフォールバック: {repr(e)}")
-            log(traceback.format_exc())
+        # provider は CUDA→CPU。ただし「モデル不在(AssertionError)」は provider と無関係なので別扱い:
+        #   - AssertionError ('detection' in self.models) = .onnx が探索先に無い → flatten autofix で復旧
+        #     （"CUDA provider 初期化失敗" と誤報しない）。
+        #   - それ以外の例外 = 本物の provider 等の失敗 → 次 provider へフォールバック。
+        #   antelopev2 の ArcFace は決定的＝CPU/GPU で embedding 同一→本番比較性は維持。GPU は FLUX 生成に温存。
+        attempts = [(["CUDAExecutionProvider", "CPUExecutionProvider"], 0, "CUDA"),
+                    (["CPUExecutionProvider"], -1, "CPU")]
+        last_exc = None
+        for providers, ctx_id, tag in attempts:
             try:
-                self._app = _build(["CPUExecutionProvider"], ctx_id=-1)
+                self._app = _build(providers, ctx_id)
                 self.provider = self._active_providers()
-                log(f"  provider(実効)= {self.provider}（CPU フォールバック・embedding 同一＝本番比較性 維持）")
-            except Exception as e2:
-                log(f"  ✖ CPU フォールバックも失敗: {repr(e2)}")
+                log(f"  provider(実効)= {self.provider} ({tag} 要求)")
+                return
+            except AssertionError as e:
+                # モデル不在。provider 失敗ではない（誤ラベル禁止）。flatten して同 provider で即再挑戦。
+                log(f"  ✖ モデル不在(AssertionError): {repr(e)} ← provider 失敗ではない（{tag} 試行中）")
                 log(traceback.format_exc())
-                raise
+                if self._inspect_and_flatten_models(model_dir, autofix):
+                    try:
+                        self._app = _build(providers, ctx_id)
+                        self.provider = self._active_providers()
+                        log(f"  ✅ flatten 後に復旧: provider(実効)= {self.provider} ({tag})")
+                        return
+                    except Exception as e2:
+                        last_exc = e2
+                        log(f"  flatten 後も {tag} で失敗: {repr(e2)}")
+                        log(traceback.format_exc())
+                        continue
+                last_exc = e
+                continue
+            except Exception as e:
+                # 握り潰さない: repr + traceback を必ず出す（空メッセージ＝デバッグ不能＝可観測性違反）。
+                log(f"  ⚠ {tag} provider 初期化失敗 → 次へフォールバック: {repr(e)}")
+                log(traceback.format_exc())
+                last_exc = e
+                continue
+        raise RuntimeError(
+            f"scorer 初期化に失敗。最後の例外: {repr(last_exc)}\n"
+            f"  → モデル不在(AssertionError)で flatten も不能なら antelopev2 の DL/配置を確認: {model_dir}"
+        ) from last_exc
 
     def embed(self, image: Image.Image):
         """最大顔の ArcFace 正規化埋め込み(512d, 単位ノルム)。顔無し→None。"""
@@ -250,7 +322,8 @@ def prepare_scorer(scorer_name, autofix, skip_deps=False):
     """
     ensure_scorer_deps(autofix, skip=skip_deps)
     scorer = ArcFaceScorer(scorer_name)
-    scorer._ensure()  # ← ここで antelopev2 モデルが HF_HOME/insightface/models/ に prefetch される
+    # prefetch + 配置点検 + 二重ネスト flatten（autofix）を含む。実体 ls もここでログされる。
+    scorer._ensure(autofix)
     autofix.append({"stage": "prefetch", "model": scorer_name, "provider": scorer.provider,
                     "hf_home": os.environ.get("HF_HOME", "/root/.cache/huggingface")})
     log(f"{scorer_name} prefetch 完了（本番と同一パス/モデル＝cosine 比較可能 / provider={scorer.provider}）")

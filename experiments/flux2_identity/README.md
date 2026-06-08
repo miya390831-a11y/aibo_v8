@@ -67,7 +67,8 @@ os.environ["HF_HOME"] = "/content/drive/MyDrive/aibo_lab/hf_cache"   # ★本番
 - **知覚は自分で合格と言わない**: グリッド/サマリに「👁 PO 目視」「cos≠知覚的同一性」を明記。GO/NO-GO は司令部/PO。
 - 識別器は本番と同一（`08_face_refiner.py` と同じ `FaceAnalysis(name="antelopev2")` / `normed_embedding` / cos）。
   - **バージョン整合**: insightface / onnxruntime-gpu を **本番 02_colab_setup と同じ非ピン方針**で自動導入（`:271,274`＝`None`）＋**numpy>=2.1.0**（`:252` 互換要件）。antelopev2 は本番と同一の DL 経路（`FaceAnalysis(name="antelopev2",root=HF_HOME/insightface).prepare()`）で prefetch ＝同一モデル・同一前処理で cosine 比較可能。`--skip-deps` で自動導入を無効化可。
-  - **provider フォールバック**: scorer は CUDA を試し、初期化失敗時は **CPUExecutionProvider に自動フォールバック**（repr+traceback をログ・実効 provider を明示）。antelopev2 の ArcFace 推論は決定的で **CPU/GPU とも embedding 同一＝本番比較性は維持**。GPU は FLUX 生成に温存（L4 等で onnxruntime-gpu の CUDA provider 初期化が落ちる事故への保険）。
+  - **antelopev2 二重ネスト autofix**: insightface 既知バグで `antelopev2.zip` が `<root>/models/antelopev2/antelopev2/*.onnx` に二重展開され `AssertionError: 'detection' in self.models` で落ちることがある。scorer は **prefetch 後に実体を ls してログ → 直下に .onnx が無くネストに在れば直下へ flatten → 再初期化**（機械的 autofix・autofix_log に記録）。これは「実験が成立しない系」ではなく自己修復する。
+  - **誤ラベル禁止**: 落ちた例外が AssertionError（=モデル不在）なら「CUDA provider 初期化失敗」とは言わない。provider 失敗（本物）の時だけ **CUDA→CPUExecutionProvider にフォールバック**（repr+traceback ログ・実効 provider 明示）。antelopev2 の ArcFace は決定的で CPU/GPU とも embedding 同一＝本番比較性は維持。GPU は FLUX 生成に温存。
 
 ## 統括が PC 側で実証済み / 残る Colab 実機確認
 **実証済み（このタブで確認）:**
