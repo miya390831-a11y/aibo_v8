@@ -60,10 +60,11 @@ class BodyShapeResult:
     person_detected: bool
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
-    backend: str = "none"  # "dwpose" | "mediapipe" | "none"
+    backend: str = "none"  # "openpose" | "dwpose" | "mediapipe" | "none"
 
 
 _dwpose_detector: Any = None
+_openpose_detector: Any = None  # RECON-029 Fix A: 生成側と同一 OpenposeDetector
 _mediapipe_landmarker: Any = None
 _last_used_backend: str = "none"
 
@@ -443,12 +444,96 @@ def _extract_keypoints_via_dwpose(
     return None
 
 
+def _lazy_init_openpose() -> Any:
+    """生成側(03 PoseExtractor)と同一の OpenposeDetector を遅延ロード(controlnet_aux/Annotators)。
+
+    RECON-029 Fix A: UI 体型抽出を生成側と同じ検出器スタックに寄せる根治。
+    controlnet_aux は既存依存・03 が本番で実証済 = 新規 backend を増やさない。
+    """
+    global _openpose_detector
+    if _openpose_detector is None:
+        # 既存 DWPose と同じく submodule 直 import(top-level __init__ 破損環境でも shim 経由で読める)
+        _bootstrap_controlnet_aux_shim()
+        OpenposeDetector = importlib.import_module("controlnet_aux.open_pose").OpenposeDetector
+        logger.info("[PoseExtractor] OpenposeDetector 初期化中 (lllyasviel/Annotators)...")
+        _openpose_detector = OpenposeDetector.from_pretrained("lllyasviel/Annotators")
+        logger.info("[PoseExtractor] OpenposeDetector 初期化完了")
+    return _openpose_detector
+
+
+def _extract_keypoints_via_openpose(
+    image: Image.Image,
+) -> Optional[dict[str, tuple[float, float, float]]]:
+    """OpenposeDetector.detect_poses の body 18点を既存 _to_named_keypoints へ流す。
+
+    detect_poses の body.keypoints は OpenPose COCO-18 順(nose,neck,R/L shoulder…ear)で、
+    x,y は [0,1] 正規化(x/W, y/H)= DWPose 経路 _extract_via_pose_estimation と同一スケール。
+    → _to_named_keypoints(18点名前順一致)→ infer_body_shape に合流。
+    """
+    detector = _lazy_init_openpose()
+    if detector is None:
+        return None
+
+    util = importlib.import_module("controlnet_aux.util")
+    arr = util.HWC3(np.array(image.convert("RGB"), dtype=np.uint8))  # 生成側 __call__ と同じ前処理
+    try:
+        poses = detector.detect_poses(arr, include_hand=False, include_face=False)
+    except TypeError:
+        # 版差で include_* kwargs 非対応 → 位置引数のみで再試行
+        poses = detector.detect_poses(arr)
+
+    if not poses:
+        logger.warning("[PoseExtractor/OpenPose] 人物未検出 (poses 空)")
+        return None
+    body = getattr(poses[0], "body", None)
+    body_kps = getattr(body, "keypoints", None) if body is not None else None
+    if not body_kps:
+        logger.warning("[PoseExtractor/OpenPose] body.keypoints が空")
+        return None
+
+    pts: list[Any] = []
+    for kp in body_kps:
+        if kp is None:
+            pts.append(None)  # 未検出関節 → _to_named_keypoints が skip
+            continue
+        x = getattr(kp, "x", None)
+        y = getattr(kp, "y", None)
+        if x is None or y is None:
+            pts.append(None)
+            continue
+        score = getattr(kp, "score", 1.0)
+        pts.append([float(x), float(y), float(score if score is not None else 1.0)])
+
+    named = _to_named_keypoints(pts)
+    return named if named else None
+
+
 def extract_keypoints(image: Image.Image) -> Optional[dict[str, tuple[float, float, float]]]:
     """
-    keypoints 抽出。DWPose を試行し、失敗時は MediaPipe Pose Landmarker にフォールバック。
+    keypoints 抽出。RECON-029 Fix A: 最優先で生成側と同一 OpenposeDetector を試行し、
+    失敗時のみ DWPose → MediaPipe Pose Landmarker にフォールバック。
     """
     global _last_used_backend
     _last_used_backend = "none"
+
+    # 脚0(最優先・RECON-029 Fix A 根治): 生成側と同一 OpenposeDetector(本番に確実に存在)。
+    #   これにより検出器スタック分岐が解消 = 全身画像での 422 が原理的に消える。
+    try:
+        kp_op = _extract_keypoints_via_openpose(image)
+        if kp_op:
+            _last_used_backend = "openpose"
+            logger.info(
+                "[PoseExtractor] backend=openpose keypoints=%d (生成側と同一 OpenposeDetector で抽出成功)",
+                len(kp_op),
+            )
+            return kp_op
+        logger.warning("[PoseExtractor] OpenposeDetector 抽出失敗 (空) → DWPose/MediaPipe へフォールバック")
+    except Exception as exc:
+        logger.warning(
+            "[PoseExtractor] OpenposeDetector 例外 → DWPose/MediaPipe へフォールバック: %s: %s",
+            type(exc).__name__,
+            exc,
+        )
 
     try:
         detector = _lazy_init_dwpose()

@@ -639,9 +639,26 @@ class FluxA100PipelineManager:
         ).to(self.device)
 
         # ─── 2. FluxControlNetPipeline 構築 (transformer 共有) ──
-        logger.info("🚀 [Stage 3b] FluxControlNetPipeline 構築 (transformer 共有)")
+        # RECON-028 案B: AIBO_PULID_CN_NATIVE(既定 "1")で PuLIDFluxControlNetPipeline を採用。
+        #   native loop が id_embeddings を明示 kwarg で渡す → wrapper(04:889-891)は素通し分岐へ。
+        #   "0" で旧 FluxControlNetPipeline(wrapper graft 経路)に即時ロールバック。
+        _cn_native = _parse_bool_env(os.environ.get("AIBO_PULID_CN_NATIVE", "1"))
+        _cn_native = True if _cn_native is None else _cn_native
+        if _cn_native:
+            try:
+                _CNetPipeCls = import_module("11_pulid_cn_pipeline").PuLIDFluxControlNetPipeline
+                logger.info("🚀 [Stage 3b] PuLIDFluxControlNetPipeline 構築 (案B native · transformer 共有)")
+            except Exception as _e_native:
+                logger.error(
+                    "❌ [Stage 3b] PuLIDFluxControlNetPipeline import 失敗 → "
+                    f"旧 FluxControlNetPipeline へフォールバック: {_e_native}"
+                )
+                _CNetPipeCls = FluxControlNetPipeline
+        else:
+            _CNetPipeCls = FluxControlNetPipeline
+            logger.info("🚀 [Stage 3b] FluxControlNetPipeline 構築 (旧経路 · AIBO_PULID_CN_NATIVE=0)")
 
-        self.pipe_cnet = FluxControlNetPipeline.from_pretrained(
+        self.pipe_cnet = _CNetPipeCls.from_pretrained(
             self.sys_cfg.base_model_repo,
             controlnet=[self.controlnet_model],  # リスト渡しで auto-wrap
             transformer=self._shared_transformer,  # ★ 共有: AIBO Binder の pulid_forward 維持
@@ -2010,12 +2027,6 @@ def bodycn_ab_run(face_ref, body_ref, seeds=(0,),
     per-run トグル(PORTRAIT mode 既定を arm だけ True)→ 終了時に必ず復帰=後退ゼロ。
     **判定はしない**(PO 目視・cos 不使用)。返り {ok, out_dir, results:[…], grids, …}。
     """
-    cfg = import_module("01_config")
-    GenerationConfig = cfg.GenerationConfig
-    IdentityConfig = cfg.IdentityConfig
-    StudioMode = cfg.StudioMode
-    ModeConfig = cfg.ModeConfig
-
     ensure_bodyrefs_dir()   # body_ref 置き場は常に在る状態に(冪等)
 
     face_img, face_id = _depth_resolve_ref(face_ref)
@@ -2039,13 +2050,31 @@ def bodycn_ab_run(face_ref, body_ref, seeds=(0,),
         print(f"[bodycn][STOP] {err}")
         return {"ok": False, "reason": err}
 
+    # ★退行修正(RECON-025 観測 run で CN が発火しなかった件・8a3ee33 由来でない):
+    #   生きている orchestrator が実際に使う config クラス/enum/ModeConfig singleton を、その
+    #   generate() の __globals__ から解決する。Colab の module reload で 01_config が二重化しても
+    #   「bodycn が触る singleton ≠ orchestrator が読む singleton」のズレ(= per-arm CN トグルが
+    #   効かず plain に落ちる)を防ぐ。取れなければ 01_config に fallback。
+    _og = getattr(getattr(orch, "generate", None), "__globals__", {}) or {}
+    _cfg = import_module("01_config")
+    GenerationConfig = _og.get("GenerationConfig") or _cfg.GenerationConfig
+    IdentityConfig   = _og.get("IdentityConfig")   or _cfg.IdentityConfig
+    StudioMode       = _og.get("StudioMode")       or _cfg.StudioMode
+    ModeConfig       = _og.get("ModeConfig")       or _cfg.ModeConfig
+
     os.makedirs(out_dir, exist_ok=True)
     device = getattr(orch.pm, "device", "cuda")
     _cuda = (device == "cuda") and torch.cuda.is_available()
 
-    # PORTRAIT mode 既定を退避(per-run トグル後に必ず復帰=後退ゼロ)
+    # PORTRAIT mode 既定を退避(per-run トグル後に必ず PORTRAIT-OFF へ復帰=既定後退ゼロ)
     pm_mode = ModeConfig.get(StudioMode.PORTRAIT)
+    _PORTRAIT_OFF = (False, False, False)   # PORTRAIT CN 既定 OFF(復帰先)
     _orig = (pm_mode.default_enable_multi_cn, pm_mode.default_cn_use_pose, pm_mode.default_cn_use_depth)
+    if _orig != _PORTRAIT_OFF:
+        logger.warning(
+            f"[bodycn] PORTRAIT mode 既定が OFF でない {_orig} = 前 run の取り残し疑い "
+            f"→ baseline/復帰は {_PORTRAIT_OFF} に正規化"
+        )
 
     results = []
     root = logging.getLogger()
@@ -2062,7 +2091,7 @@ def bodycn_ab_run(face_ref, body_ref, seeds=(0,),
                     pm_mode.default_cn_use_depth = False        # MVP=pose 単体
                 else:
                     (pm_mode.default_enable_multi_cn, pm_mode.default_cn_use_pose,
-                     pm_mode.default_cn_use_depth) = _orig
+                     pm_mode.default_cn_use_depth) = _PORTRAIT_OFF   # baseline は確実に OFF(取り残しを継がない)
 
                 gen_cfg = GenerationConfig(prompt=prompt, width=int(width),
                                            height=int(height), seed=int(sd))
@@ -2071,6 +2100,11 @@ def bodycn_ab_run(face_ref, body_ref, seeds=(0,),
                     id_cfg.pose_reference_image = body_img       # body_ref → pose 抽出元
                     id_cfg.cn_pose_weight = float(w)             # 非 Setting A=自由
                     id_cfg.cn_pose_guidance_end = float(gend)    # 非 Setting A=自由
+                    # belt&suspenders: enable_multi_cn は id_cfg 直設定で merge を生き残る
+                    # (≠ 工場出荷既定 False)→ singleton 依存を半減。cn_use_pose は mode singleton 経由
+                    # (工場出荷既定 True ゆえ merge で潰される=構造上 singleton 必須)。
+                    id_cfg.enable_multi_cn = True
+                    id_cfg.cn_use_depth = False
 
                 cap = _LogCapture()
                 prev_prop = av.propagate
@@ -2143,11 +2177,11 @@ def bodycn_ab_run(face_ref, body_ref, seeds=(0,),
             _depth_grid(items, grid, ncols=len(arms), show=show,
                         title=f"body-CN spike  face={face_id} body={body_id} seed={sd}  (cols=arm; PO visual)")
     finally:
-        # PORTRAIT mode 既定を必ず復帰(後退ゼロ)
+        # PORTRAIT mode 既定を必ず PORTRAIT-OFF へ復帰(取り残しを継がない=既定後退ゼロ)
         (pm_mode.default_enable_multi_cn, pm_mode.default_cn_use_pose,
-         pm_mode.default_cn_use_depth) = _orig
-        print(f"[bodycn] PORTRAIT mode 既定を復帰: enable_multi_cn={_orig[0]} "
-              f"cn_use_pose={_orig[1]} cn_use_depth={_orig[2]}")
+         pm_mode.default_cn_use_depth) = _PORTRAIT_OFF
+        print(f"[bodycn] PORTRAIT mode 既定を復帰: enable_multi_cn={_PORTRAIT_OFF[0]} "
+              f"cn_use_pose={_PORTRAIT_OFF[1]} cn_use_depth={_PORTRAIT_OFF[2]}")
 
     # 合格条件サマリ(観測値の提示のみ・判定は PO)
     print("=" * 64)

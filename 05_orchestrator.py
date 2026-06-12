@@ -961,6 +961,59 @@ class CharacterOrchestrator:
                 "control_mode": control_modes,
             }
 
+            # ─── 3.5 RECON-028 案B: native pipeline へ PuLID 素材を明示渡し ───
+            #   id_embeddings を明示 kwarg で渡す → 共有 transformer の wrapper
+            #   (04:889-891)が素通し分岐で raw pulid_forward へ直行 = clean native pass。
+            #   旧 FluxControlNetPipeline(AIBO_PULID_CN_NATIVE=0)は4 kwargs 非対応のため
+            #   pipeline クラス名で gate する(旧経路はこのブロックを素通し=退行ゼロ)。
+            if type(self.pm.pipe_cnet).__name__ == "PuLIDFluxControlNetPipeline":
+                pm_pulid = getattr(self.pm.pipe_base, "pulid_model", None)
+                ref = identity_data.get("reference_image")  # snipe 済み1枚目
+                id_emb = None
+                if pm_pulid is not None and ref is not None:
+                    _resize_fn = None
+                    _resize_errs = []
+                    for _modpath in ("pulid.utils", "nunchaku.models.pulid.utils",
+                                     "nunchaku.utils", "pulid.pipeline_flux"):
+                        try:
+                            _cand = getattr(import_module(_modpath), "resize_numpy_image_long", None)
+                            if _cand is not None:
+                                _resize_fn = _cand
+                                break
+                            _resize_errs.append(f"{_modpath}: 属性なし")
+                        except Exception as _re_imp:
+                            _resize_errs.append(f"{_modpath}: {type(_re_imp).__name__}: {_re_imp}")
+                    try:
+                        if _resize_fn is None:
+                            raise RuntimeError(f"resize_numpy_image_long import 不可: {_resize_errs}")
+                        # native 単写 v0.9.1 抽出(案A/ipoff と同一素材)
+                        id_np = _resize_fn(np.array(ref.convert("RGB")), 1024)
+                        id_emb, _ = pm_pulid.get_id_embedding(id_np)  # facexlib align 失敗=RuntimeError
+                        logger.info(
+                            f"💉 [Pass 1 CN] native単写 emb 抽出 OK (shape={tuple(id_emb.shape)})"
+                        )
+                    except Exception as _e_emb:
+                        logger.warning(
+                            "⚠️ [Pass 1 CN] native embed 抽出失敗 → "
+                            f"extractor 集約 id_embeds で続行(黙らない): {_e_emb}"
+                        )
+                        id_emb = identity_data.get("id_embeds")
+                else:
+                    logger.warning(
+                        "⚠️ [Pass 1 CN] pulid_model/reference_image 欠落 → "
+                        "extractor 集約 id_embeds で続行"
+                    )
+                    id_emb = identity_data.get("id_embeds")
+                # Step 4 (B-0): IP-Adapter は完全遮断。ip_adapter_image_embeds は渡さない。
+                kwargs["id_embeddings"] = id_emb
+                kwargs["id_weight"] = identity_data.get("pulid_weight", 0.7)
+                kwargs["pulid_start_timestep"] = None   # 第1弾: base 同等(全 step ON)
+                kwargs["pulid_end_timestep"] = None
+                logger.info(
+                    "🧭 [OBS-ROUTE] 案B native PuLID-CN 素材渡し: "
+                    f"id_weight={kwargs['id_weight']} / gating=None(全step) / IP=off(B-0)"
+                )
+
             # ─── 4. 推論実行 ──────────────────────────────────────
             logger.info(
                 f"🚀 [Pass 1 CN] 推論開始 "

@@ -824,9 +824,20 @@ async def extract_body_shape(req: ExtractBodyShapeRequest) -> ExtractBodyShapeRe
     if "invalid_image" in result.errors:
         raise HTTPException(status_code=400, detail="画像が小さすぎます")
     if "person_not_detected" in result.errors:
+        # RECON-029 Fix C: 実原因(検出器スタック)を露出。422 は画像内容ではなく
+        #   keypoints=None(どの検出器も起動・推論できず)を意味する(16:707)。
+        logger.warning(
+            "[extract_body_shape] person_not_detected backend=%s keypoints=%d "
+            "(検出器が keypoints を返せず。backend=none は OpenPose/DWPose/MediaPipe いずれも不可)",
+            result.backend,
+            result.keypoints_count,
+        )
         raise HTTPException(
             status_code=422,
-            detail="人物が検出できませんでした。全身が写った画像をご使用ください。",
+            detail=(
+                f"人物が検出できませんでした (検出器 backend={result.backend})。"
+                "backend=none の場合は姿勢検出器が起動できていません(画像のせいではありません)。"
+            ),
         )
     if "insufficient_keypoints" in result.errors:
         raise HTTPException(
