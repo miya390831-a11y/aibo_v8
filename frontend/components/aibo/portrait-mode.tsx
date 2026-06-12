@@ -37,6 +37,7 @@ import {
 } from "@/lib/api-portrait"
 import { ApiError } from "@/lib/api"
 import { estimateBase64Bytes, loadImage, shrinkForPreview } from "@/lib/image-utils"
+import { rollRandomPrompt } from "@/lib/random_prompt_pool"
 
 export type PortraitState = "initial" | "quick_done" | "neutral_done"
 type AxisKey = "base" | "proportion" | "silhouette" | "curves" | "posture"
@@ -82,6 +83,8 @@ export function PortraitMode({
     null,
   ])
   const [prompt, setPrompt] = useState(DEFAULT_PROMPT)
+  const [userPrompt, setUserPrompt] = useState(DEFAULT_PROMPT)  // 手打ちの元文(OFF で復帰)
+  const [randomMode, setRandomMode] = useState(false)           // 🎲 ランダムプロンプト ON/OFF
   const [negativePrompt, setNegativePrompt] = useState(DEFAULT_NEGATIVE)
   const [randomSeed, setRandomSeed] = useState(true)
   const [manualSeed, setManualSeed] = useState("")
@@ -359,6 +362,8 @@ export function PortraitMode({
     sseStreamRef.current?.close()
     setFaceUploads([null, null, null, null, null])
     setPrompt(DEFAULT_PROMPT)
+    setUserPrompt(DEFAULT_PROMPT)
+    setRandomMode(false)
     setNegativePrompt(DEFAULT_NEGATIVE)
     setManualSeed("")
     setRandomSeed(true)
@@ -389,9 +394,30 @@ export function PortraitMode({
     onStateChange("initial")
   }, [onStateChange])
 
+  const handleToggleRandom = () => {
+    if (randomMode) {
+      // ON → OFF: 保持した手打ち元文へ復帰
+      setRandomMode(false)
+      setPrompt(userPrompt)
+    } else {
+      // OFF → ON: 現在の手打ちを保持し、ランダム生成文を反映(編集可のまま)
+      setUserPrompt(prompt)
+      setPrompt(rollRandomPrompt())
+      setRandomMode(true)
+    }
+  }
+  const handleReroll = () => {
+    if (!randomMode) return
+    setPrompt(rollRandomPrompt())
+  }
+  const handlePromptChange = (v: string) => {
+    setPrompt(v)
+    if (!randomMode) setUserPrompt(v)  // OFF 時の編集は手打ち元文も更新(復帰先を最新化)
+  }
+
   return (
-    <div className="grid grid-cols-[340px_minmax(0,1fr)_440px] gap-3 px-3 py-3 min-h-[calc(100vh-90px)]">
-      <div className="space-y-3 overflow-y-auto pr-1">
+    <div className="grid grid-cols-[340px_minmax(0,1fr)_440px] grid-rows-[minmax(0,1fr)] gap-3 px-3 py-3 h-full">
+      <div className="space-y-3 overflow-y-auto pr-1 h-full min-h-0">
         <CyberPanel title="FACE REFERENCE" numero="01">
           <div className="grid grid-cols-3 gap-2">
             {faceUploads.map((src, i) =>
@@ -423,7 +449,34 @@ export function PortraitMode({
         </CyberPanel>
 
         <CyberPanel title="PROMPT" numero="02">
-          <textarea className="cyber-textarea" rows={4} value={prompt} onChange={(e) => setPrompt(e.target.value)} />
+          {/* ヘッダ右: 🎲ランダムトグル + 引き直し(.cyber-panel が relative なので絶対配置で右上へ) */}
+          <div className="absolute top-3 right-3 z-10 flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={handleToggleRandom}
+              aria-pressed={randomMode}
+              title={randomMode ? "ランダムプロンプト ON(クリックで手打ちに復帰)" : "ランダムプロンプト OFF"}
+              className="cyber-btn !px-2 !py-1 !text-[10px]"
+              style={{
+                background: randomMode ? "var(--gradient-primary-soft)" : undefined,
+                borderColor: randomMode ? "var(--cyber-cyan)" : undefined,
+                color: randomMode ? "var(--cyber-cyan)" : undefined,
+              }}
+            >
+              🎲 ランダム{randomMode ? " ON" : ""}
+            </button>
+            <button
+              type="button"
+              onClick={handleReroll}
+              disabled={!randomMode}
+              title={randomMode ? "引き直す" : "ランダム ON 時のみ有効"}
+              aria-label="プロンプトを引き直す"
+              className="cyber-btn !px-2 !py-1 !text-[12px] disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              🎲
+            </button>
+          </div>
+          <textarea className="cyber-textarea" rows={4} value={prompt} onChange={(e) => handlePromptChange(e.target.value)} />
           <details className="mt-3">
             <summary className="cursor-pointer font-mono text-[10px] text-[var(--cyber-cyan)]/80">▸ ネガティブを編集する</summary>
             <textarea className="cyber-textarea mt-2" rows={3} value={negativePrompt} onChange={(e) => setNegativePrompt(e.target.value)} />
@@ -442,7 +495,7 @@ export function PortraitMode({
         </details>
       </div>
 
-      <div className="space-y-3 overflow-y-auto">
+      <div className="space-y-3 overflow-y-auto h-full min-h-0">
         <div className="cyber-panel cyber-grid !p-4">
           <button
             className="w-full flex items-center gap-2 border border-[var(--cyber-cyan-dim)] px-3 py-2"
@@ -528,7 +581,7 @@ export function PortraitMode({
         </div>
       </div>
 
-      <div className="space-y-3 overflow-y-auto pl-1">
+      <div className="space-y-3 overflow-y-auto pl-1 h-full min-h-0">
         <CyberPanel title="PREVIEW" numero="">
           <div className="mb-2 flex items-center gap-2">
             <button
@@ -559,7 +612,7 @@ export function PortraitMode({
               />
             </div>
           )}
-          <div className="cyber-panel scanlines relative h-[460px] overflow-hidden flex items-center justify-center" style={{ padding: 0 }}>
+          <div className="cyber-panel scanlines relative h-[460px] overflow-hidden flex items-center justify-center sticky top-0 z-10" style={{ padding: 0 }}>
             {generating && progressEvent ? (
               <div className="w-[400px] max-w-[90%]">
                 <ProgressHud

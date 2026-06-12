@@ -39,7 +39,7 @@ export default function AiboCyberStudioPage() {
           : "READY"
 
   return (
-    <main className="min-h-screen flex flex-col">
+    <main className="h-dvh flex flex-col overflow-hidden">
       <CyberHeader mode={mode} onModeChange={setMode} />
 
       <GlobalDemoControls
@@ -53,9 +53,9 @@ export default function AiboCyberStudioPage() {
         onOpenEnlarge={() => setShowEnlarge(true)}
       />
 
-      <div className="flex-1">
+      <div className="flex-1 min-h-0">
         {mode === "portrait" && (
-          <div key="portrait" className="animate-fade-in">
+          <div key="portrait" className="animate-fade-in h-full">
             <PortraitMode
               state={portraitState}
               onStateChange={setPortraitState}
@@ -65,12 +65,12 @@ export default function AiboCyberStudioPage() {
           </div>
         )}
         {mode === "coordinate" && (
-          <div key="coordinate" className="animate-fade-in">
+          <div key="coordinate" className="animate-fade-in h-full">
             <CoordinateMode />
           </div>
         )}
         {mode === "situation" && (
-          <div key="situation" className="animate-fade-in">
+          <div key="situation" className="animate-fade-in h-full">
             <SituationMode />
           </div>
         )}

@@ -67,9 +67,9 @@ export function CoordinateMode() {
   }, [])
 
   return (
-    <div className="grid grid-cols-[340px_minmax(0,1fr)_360px] gap-3 px-3 py-3 min-h-[calc(100vh-90px)]">
+    <div className="grid grid-cols-[340px_minmax(0,1fr)_360px] grid-rows-[minmax(0,1fr)] gap-3 px-3 py-3 h-full">
       {/* === LEFT === */}
-      <div className="space-y-3 overflow-y-auto pr-1">
+      <div className="space-y-3 overflow-y-auto pr-1 h-full min-h-0">
         <CyberPanel title="素体画像" numero="01">
           <div className="cyber-panel scanlines !p-0 h-[200px] flex items-center justify-center mb-2 cyber-panel-magenta">
             {neutralSrc ? (
@@ -146,7 +146,7 @@ export function CoordinateMode() {
       </div>
 
       {/* === CENTER === */}
-      <div className="space-y-3 overflow-y-auto">
+      <div className="space-y-3 overflow-y-auto h-full min-h-0">
         {/* Demo state switcher */}
         <div className="flex items-center gap-1 justify-end">
           {(["prep", "generating", "result"] as CoordState[]).map((s, i) => (
@@ -329,7 +329,7 @@ export function CoordinateMode() {
       </div>
 
       {/* === RIGHT === */}
-      <div className="space-y-3 overflow-y-auto pl-1">
+      <div className="space-y-3 overflow-y-auto pl-1 h-full min-h-0">
         <CyberPanel title="MASK ADJUSTMENT">
           <SubHeader>Tier 1 ワンクリック修正</SubHeader>
           <SubHeader>顔マスク:</SubHeader>
