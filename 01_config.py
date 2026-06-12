@@ -335,14 +335,19 @@ class IdentityConfig:
     reference_images: Optional[list[Image.Image]] = None
 
     # PuLID (v0.9.0 · Identity 優先版)
-    pulid_weight: float = 0.6  # OP-CHANGE-001 (2026-06-07): 3 段並列既定 0.7→0.6
-                               # ※ 3 段並列既定 = 0.6。D1 応答曲線 + PO 目視で決定:
+    pulid_weight: float = 0.7  # REVERT (2026-06-12): OP-CHANGE-001 の 0.7→0.6 を差し戻し。
+                               #    OP-CHANGE-001 の 0.6 は「撤去済の第3脚(style-LoRA)」前提の
+                               #    3 段並列値で、第3脚が無い現構成では identity 不足→別人化
+                               #    (base 不保持の主因)。Setting A 確定時の実機検証値 0.7 へ revert
+                               #    (PO 確認・Nika-chan 復活)。
+                               # ── 以下は旧 0.6 の根拠(撤去済 第3脚前提・無効・履歴)──
+                               # ※ 旧 3 段並列既定 = 0.6。D1 応答曲線 + PO 目視で決定:
                                #    cos 最適 = 1.0 だが焼け/プラスチック域 → 見た目最適 = 0.6
                                #    (似てる × 自然の両取り点)。商用 React→FastAPI の既定。
                                # ※ 単独運用時 (Stage 4-D-2 only) は 2.5 が黄金値(据置)
-                               # ※ 旧既定 0.7 = v7.4.0 Phase 1 実機確定値 (PO 探索 · 2026-05-06)。
+                               # ※ 0.7 = v7.4.0 Phase 1 実機確定値 (PO 探索 · 2026-05-06)。
                                #    PuLID 0.7/0.85/1.0 大差なし (エネルギー総量一定の法則)
-                               # ※ IP-Adapter 0.75 + style-LoRA(第3レバー)0.6 + PuLID 0.6 の 3 段並列構成
+                               # ※ 旧 3 段並列構成 = IP-Adapter 0.75 + style-LoRA(第3レバー)0.6 + PuLID 0.6
     # 2026-05-23: O3 コンサル + 実機検証で Setting A に刷新
     pulid_sigma_start: float = 0.25           # 旧 0.2 → 0.25
     pulid_sigma_end: float = 0.90             # 旧 1.0 → 0.90
