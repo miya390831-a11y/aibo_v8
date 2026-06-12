@@ -1705,6 +1705,13 @@ class IdentityEngine:
             else:
                 # IP-Adapter 無効時はクリア (前回の値が残らないように)
                 object.__setattr__(transformer, "_pulid_ip_embeds", None)
+                # Step1-pre OBS③: 休眠ケースを可視化(logging only · 挙動不変)
+                #   ip_image_embeds 未生成 → CN forward ラッパーの IP 注入は休眠。
+                #   RECON-025 が指摘した CN identity drift の主因をこの1行で確定できる。
+                logger.info(
+                    "  💤 [OBS-IP] _pulid_ip_embeds=None にクリア "
+                    "(ip_image_embeds 無し → CN 経路の IP-Adapter は休眠)"
+                )
 
             # PuLID 注入用 attribute (Stage 4-B 互換 · auto_pulid_forward が CN 経路で読む)
             object.__setattr__(transformer, "_pulid_id_embeds", identity_data["id_embeds"])

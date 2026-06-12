@@ -735,6 +735,24 @@ class CharacterOrchestrator:
             logger.info(f"    ↳ 失敗理由    : extract={_extract_err or 'なし'} / init={_init_err or 'なし'}")
         # RECON-005 FIX-2: faces_detected は single-ref では無意味 · 判断に使わせない
         logger.info(f"  faces_detected  : n/a(single-ref)")
+        # ─── Step1-pre OBS②③: CN 経路 identity 診断(logging only · 挙動不変)─
+        #   共有 transformer の注入カウンタ/属性を getattr で読むだけ(値は変えない)。
+        #   経路は上の [OBS-ROUTE] 行を参照(最後の1行が実効経路)。
+        #   注意: inject_count は forward ラッパーが「初回のみ」加算(最大1で頭打ち)。
+        #         よって >0 = この実行(=直近の wrap 以降)で CN 自動注入が発火した、の意。
+        _tf = getattr(self.pm, "_shared_transformer", None)
+        _pulid_inject_n = getattr(_tf, "_auto_pulid_inject_count", 0)
+        _ip_inject_n = getattr(_tf, "_auto_ip_inject_count", 0)
+        _ip_embeds = getattr(_tf, "_pulid_ip_embeds", None)
+        logger.info(
+            f"  pulid_used(CN)  : inject_count={_pulid_inject_n} "
+            f"({'発火✅' if _pulid_inject_n else '未発火⚠️'})"
+        )
+        logger.info(
+            f"  ip_restored     : {_ip_embeds is not None} "
+            f"(_pulid_ip_embeds={'有' if _ip_embeds is not None else 'None⚠️休眠'}"
+            f" / ip_inject_count={_ip_inject_n})"
+        )
         logger.info("─" * 60)
 
         return result
@@ -811,6 +829,10 @@ class CharacterOrchestrator:
                 # kwargs["controlnet_mode"] = None
                 # kwargs["controlnet_conditioning_scale"] = ctrl_weight
 
+            # Step1-pre OBS①: 実効経路マーカー(logging only · 挙動不変)
+            #   _run_pass1_with_cn からのフォールバック時もこの行が出るため、
+            #   最後に出た [OBS-ROUTE] 行 = 実際に画像を生成した経路。
+            logger.info("🧭 [OBS-ROUTE] 経路=_run_pass1 (plain pipe_base / CN未統合・CN-skip 枝)")
             logger.info(f"🚀 [Pass 1] generate (steps={steps}, seed={seed})")
 
             # 🥷 v7.2.1 Patch A.3: AIBO_FORCE_OFFLOAD=1 のときのみ GPU 復帰
@@ -945,6 +967,10 @@ class CharacterOrchestrator:
                 f"({len(control_images)} CN, {steps} steps)"
             )
 
+            # Step1-pre OBS①: 実効経路マーカー(logging only · 挙動不変)
+            #   この行が出て直後にフォールバック [OBS-ROUTE]=_run_pass1 が無ければ
+            #   pipe_cnet が実際に走った = CN 経路確定。
+            logger.info("🧭 [OBS-ROUTE] 経路=_run_pass1_with_cn (pipe_cnet)")
             t_start = time.perf_counter()
             output = self.pm.pipe_cnet(**kwargs)
             elapsed = time.perf_counter() - t_start
