@@ -172,6 +172,10 @@ class BodyShape(BaseModel):
     silhouette: BodyShapeAxis = BodyShapeAxis()
     curves: BodyShapeAxis = BodyShapeAxis()
     posture: BodyShapeAxis = BodyShapeAxis()
+    hips: BodyShapeAxis = BodyShapeAxis()
+    shoulder: BodyShapeAxis = BodyShapeAxis()
+    legs: BodyShapeAxis = BodyShapeAxis()
+    bust: BodyShapeAxis = BodyShapeAxis()
 
 
 class GenerateRequest(BaseModel):
@@ -214,7 +218,9 @@ class ExtractBodyShapeRequest(BaseModel):
 
 
 class ExtractBodyShapeResponse(BaseModel):
-    body_shape: BodyShape
+    # §5: body_shape は「抽出できた軸のみ」の partial dict(手動キーは含めない)。
+    #     フロント側で per-axis マージして手動値/初期値を保持する。
+    body_shape: dict[str, dict[str, float]]
     confidence: float
 
 
@@ -251,22 +257,26 @@ _BODY_SHAPE_PHRASES: dict[str, dict[str, dict[float, str]]] = {
         },
     },
     "proportion": {
+        # §3/§7 再編: X=頭身(小頭身⇔大頭身), Y=顔の輪郭(丸顔⇔面長, 手動)。
+        #   旧 X(脚長)は LEGS.x へ移設。
         "x": {
-            -1.0: "shorter legs, traditional proportions",
-            -0.5: "slightly shorter legs",
+            -1.0: "larger head, 6-head proportions",
+            -0.5: "slightly larger head",
             0.0: "",
-            0.5: "long legs, model proportions",
-            1.0: "extremely long legs, fashion-model proportions",
+            0.5: "petite head, 7.5-head proportions",
+            1.0: "petite head, 8-head proportions",
         },
         "y": {
-            -1.0: "youthful round face, 6-head proportions",
-            -0.5: "youthful features",
+            -1.0: "round face",
+            -0.5: "rounder face",
             0.0: "",
-            0.5: "mature features, 7.5-head proportions",
-            1.0: "mature elegant features, 8-head proportions",
+            0.5: "longer oval face",
+            1.0: "long oval face",
         },
     },
     "silhouette": {
+        # §3/§7 再編: X=メリハリ(直線⇔曲線, 現状維持), Y=全体の肉付き(華奢⇔ふくよか, 手動)。
+        #   旧 Y(肩)は SHOULDER へ移設。
         "x": {
             -1.0: "straight athletic silhouette",
             -0.5: "athletic silhouette",
@@ -275,11 +285,11 @@ _BODY_SHAPE_PHRASES: dict[str, dict[str, dict[float, str]]] = {
             1.0: "hourglass figure, pronounced curves",
         },
         "y": {
-            -1.0: "delicate frame, slender",
-            -0.5: "delicate frame",
+            -1.0: "very slender frame",
+            -0.5: "slender frame",
             0.0: "",
-            0.5: "voluptuous figure",
-            1.0: "very voluptuous figure",
+            0.5: "fuller frame",
+            1.0: "full figure",
         },
     },
     "curves": {
@@ -312,6 +322,73 @@ _BODY_SHAPE_PHRASES: dict[str, dict[str, dict[float, str]]] = {
             0.0: "",
             0.5: "confident stance",
             1.0: "sharp confident stance, athletic poise",
+        },
+    },
+    "hips": {
+        "x": {
+            -1.0: "narrow hips, straight figure",
+            -0.5: "slightly narrow hips",
+            0.0: "",
+            0.5: "fuller hips",
+            1.0: "fuller hips, pear-shaped figure",
+        },
+        "y": {
+            -1.0: "low hip line",
+            -0.5: "low hip line",
+            0.0: "",
+            0.5: "high hip line",
+            1.0: "high hip line",
+        },
+    },
+    "shoulder": {
+        # §7 新規: X=狭い肩⇔広い肩, Y=なで肩⇔いかり肩。上品トーン。
+        "x": {
+            -1.0: "narrow shoulders",
+            -0.5: "slightly narrow shoulders",
+            0.0: "",
+            0.5: "broad shoulders",
+            1.0: "broad strong shoulders",
+        },
+        "y": {
+            -1.0: "sloping shoulders",
+            -0.5: "sloping shoulders",
+            0.0: "",
+            0.5: "straight squared shoulders",
+            1.0: "straight squared shoulders",
+        },
+    },
+    "legs": {
+        # §7 新規: X=短い脚⇔長い脚(旧 proportion.x の脚長を移設), Y=細い脚⇔しっかり(手動)。
+        "x": {
+            -1.0: "shorter legs",
+            -0.5: "slightly shorter legs",
+            0.0: "",
+            0.5: "long legs",
+            1.0: "long legs, long-legged proportions",
+        },
+        "y": {
+            -1.0: "slender legs",
+            -0.5: "slender legs",
+            0.0: "",
+            0.5: "toned legs",
+            1.0: "toned legs",
+        },
+    },
+    "bust": {
+        # §7 新規(手動のみ): X=控えめ⇔豊か, Y=バスト位置 低⇔高。上品トーン厳守・誇張不可。
+        "x": {
+            -1.0: "petite bust",
+            -0.5: "petite bust",
+            0.0: "",
+            0.5: "fuller bust",
+            1.0: "fuller figure",
+        },
+        "y": {
+            -1.0: "lower bustline",
+            -0.5: "lower bustline",
+            0.0: "",
+            0.5: "higher bustline",
+            1.0: "higher bustline",
         },
     },
 }
@@ -853,21 +930,15 @@ async def extract_body_shape(req: ExtractBodyShapeRequest) -> ExtractBodyShapeRe
     if "low_confidence" in result.warnings:
         logger.warning("[extract_body_shape] low confidence: %.2f", result.confidence)
 
-    body_shape = BodyShape(
-        base=BodyShapeAxis(**result.body_shape["base"]),
-        proportion=BodyShapeAxis(**result.body_shape["proportion"]),
-        silhouette=BodyShapeAxis(**result.body_shape["silhouette"]),
-        curves=BodyShapeAxis(**result.body_shape["curves"]),
-        posture=BodyShapeAxis(**result.body_shape["posture"]),
-    )
-
     logger.info(
         "[extract_body_shape] done %.2fs keypoints=%d confidence=%.2f",
         elapsed,
         result.keypoints_count,
         result.confidence,
     )
-    return ExtractBodyShapeResponse(body_shape=body_shape, confidence=result.confidence)
+    # §5: result.body_shape は抽出できた軸のみの partial dict(手動キーは含めない)。
+    #     そのまま返し、フロント側で per-axis マージして手動値を保持する。
+    return ExtractBodyShapeResponse(body_shape=result.body_shape, confidence=result.confidence)
 
 
 @app.post("/api/portrait/apply_makeup")

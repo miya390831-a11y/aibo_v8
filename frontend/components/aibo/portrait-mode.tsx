@@ -40,7 +40,16 @@ import { estimateBase64Bytes, loadImage, shrinkForPreview } from "@/lib/image-ut
 import { rollRandomPrompt } from "@/lib/random_prompt_pool"
 
 export type PortraitState = "initial" | "quick_done" | "neutral_done"
-type AxisKey = "base" | "proportion" | "silhouette" | "curves" | "posture"
+type AxisKey =
+  | "base"
+  | "proportion"
+  | "silhouette"
+  | "curves"
+  | "posture"
+  | "hips"
+  | "shoulder"
+  | "legs"
+  | "bust"
 
 const DEFAULT_PROMPT =
   "casual portrait photo, white ribbed knit top, fitted skinny pants, looking at camera, soft natural daylight, 50mm lens, photorealistic, sharp focus on face"
@@ -51,13 +60,18 @@ const NEUTRAL_PLACEHOLDER =
 
 const AXIS_META: Record<AxisKey, { title: string; x: string; y: string }> = {
   base: { title: "BASE", x: "細身 ⇔ がっしり", y: "若め ⇔ 大人" },
-  proportion: { title: "PROPORTION", x: "頭大 ⇔ 頭小", y: "7頭身 ⇔ 8.5頭身" },
-  silhouette: { title: "SILHOUETTE", x: "細身 ⇔ ふくよか", y: "小柄 ⇔ 長身" },
+  proportion: { title: "PROPORTION", x: "頭大 ⇔ 頭小", y: "丸顔 ⇔ 面長" },
+  silhouette: { title: "SILHOUETTE", x: "直線的 ⇔ 曲線的", y: "華奢 ⇔ ふくよか" },
   curves: { title: "CURVES", x: "スレンダー ⇔ グラマー", y: "直線 ⇔ くびれ" },
   posture: { title: "POSTURE", x: "猫背 ⇔ 直立", y: "脱力 ⇔ きりっと" },
+  hips: { title: "HIP", x: "細い腰 ⇔ ふくよか", y: "ヒップ位置 低 ⇔ 高" },
+  shoulder: { title: "SHOULDER", x: "狭い肩 ⇔ 広い肩", y: "なで肩 ⇔ いかり肩" },
+  legs: { title: "LEGS", x: "短い脚 ⇔ 長い脚", y: "細い脚 ⇔ しっかり" },
+  bust: { title: "BUST", x: "控えめ ⇔ 豊か", y: "バスト位置 低 ⇔ 高" },
 }
 const TOP_AXES: AxisKey[] = ["base", "proportion", "silhouette"]
-const BOTTOM_AXES: AxisKey[] = ["curves", "posture"]
+const MID_AXES: AxisKey[] = ["curves", "posture", "hips"]
+const BOTTOM_AXES: AxisKey[] = ["shoulder", "legs", "bust"]
 
 export function PortraitMode({
   state,
@@ -96,6 +110,10 @@ export function PortraitMode({
     silhouette: { x: 0, y: 0 },
     curves: { x: 0, y: 0 },
     posture: { x: 0, y: 0 },
+    hips: { x: 0, y: 0 },
+    shoulder: { x: 0, y: 0 },
+    legs: { x: 0, y: 0 },
+    bust: { x: 0, y: 0 },
   })
   const [shapeSource, setShapeSource] = useState<"extracted" | "manual" | null>(null)
   const [styleImage, setStyleImage] = useState<string | null>(null)
@@ -215,7 +233,16 @@ export function PortraitMode({
     setExtractingShape(true)
     try {
       const res = await extractBodyShape({ image: styleImage })
-      setBodyShape(res.body_shape)
+      // §6 マージ必須(置換禁止): 抽出は「抽出できた軸のみ」の partial。
+      //   per-axis でマージし、抽出が返さない手動キー(bust 等)・手動軸(proportion.y 等)を保持する。
+      setBodyShape((prev) => {
+        const next: BodyShape = { ...prev }
+        for (const key of Object.keys(res.body_shape) as AxisKey[]) {
+          const incoming = res.body_shape[key]
+          if (incoming) next[key] = { ...prev[key], ...incoming }
+        }
+        return next
+      })
       setShapeSource("extracted")
       setShapeConfidence(Math.round(res.confidence * 100))
       toast.show("体型抽出が完了しました", "success")
@@ -375,6 +402,10 @@ export function PortraitMode({
       silhouette: { x: 0, y: 0 },
       curves: { x: 0, y: 0 },
       posture: { x: 0, y: 0 },
+      hips: { x: 0, y: 0 },
+      shoulder: { x: 0, y: 0 },
+      legs: { x: 0, y: 0 },
+      bust: { x: 0, y: 0 },
     })
     setShapeSource(null)
     setStyleImage(null)
@@ -526,36 +557,23 @@ export function PortraitMode({
               </div>
 
               <div className="space-y-3">
-                <div className="grid grid-cols-3 gap-3">
-                  {TOP_AXES.map((axis) => (
-                    <ShapeChart
-                      key={axis}
-                      title={AXIS_META[axis].title}
-                      xLabel={AXIS_META[axis].x}
-                      yLabel={AXIS_META[axis].y}
-                      value={bodyShape[axis]}
-                      onChange={(x, y) => {
-                        setBodyShape((prev) => ({ ...prev, [axis]: { x, y } }))
-                        if (shapeSource === "extracted") setShapeSource("manual")
-                      }}
-                    />
-                  ))}
-                </div>
-                <div className="grid grid-cols-3 gap-3">
-                  {BOTTOM_AXES.map((axis) => (
-                    <ShapeChart
-                      key={axis}
-                      title={AXIS_META[axis].title}
-                      xLabel={AXIS_META[axis].x}
-                      yLabel={AXIS_META[axis].y}
-                      value={bodyShape[axis]}
-                      onChange={(x, y) => {
-                        setBodyShape((prev) => ({ ...prev, [axis]: { x, y } }))
-                        if (shapeSource === "extracted") setShapeSource("manual")
-                      }}
-                    />
-                  ))}
-                </div>
+                {[TOP_AXES, MID_AXES, BOTTOM_AXES].map((row, rowIdx) => (
+                  <div key={rowIdx} className="grid grid-cols-3 gap-3">
+                    {row.map((axis) => (
+                      <ShapeChart
+                        key={axis}
+                        title={AXIS_META[axis].title}
+                        xLabel={AXIS_META[axis].x}
+                        yLabel={AXIS_META[axis].y}
+                        value={bodyShape[axis]}
+                        onChange={(x, y) => {
+                          setBodyShape((prev) => ({ ...prev, [axis]: { x, y } }))
+                          if (shapeSource === "extracted") setShapeSource("manual")
+                        }}
+                      />
+                    ))}
+                  </div>
+                ))}
               </div>
 
               <div className="flex justify-end">
@@ -568,6 +586,10 @@ export function PortraitMode({
                       silhouette: { x: 0, y: 0 },
                       curves: { x: 0, y: 0 },
                       posture: { x: 0, y: 0 },
+                      hips: { x: 0, y: 0 },
+                      shoulder: { x: 0, y: 0 },
+                      legs: { x: 0, y: 0 },
+                      bust: { x: 0, y: 0 },
                     })
                     setShapeSource(null)
                     setShapeConfidence(null)
@@ -899,13 +921,13 @@ function ShapeChart({
   title,
   xLabel,
   yLabel,
-  value,
+  value = { x: 0, y: 0 },
   onChange,
 }: {
   title: string
   xLabel: string
   yLabel: string
-  value: { x: number; y: number }
+  value?: { x: number; y: number }
   onChange: (x: number, y: number) => void
 }) {
   const xRel = (value.x + 1) / 2

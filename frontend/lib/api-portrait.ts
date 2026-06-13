@@ -15,6 +15,10 @@ export interface BodyShape {
   silhouette: BodyShapeAxis
   curves: BodyShapeAxis
   posture: BodyShapeAxis
+  hips: BodyShapeAxis
+  shoulder: BodyShapeAxis
+  legs: BodyShapeAxis
+  bust: BodyShapeAxis
 }
 
 export interface GenerateRequest {
@@ -64,7 +68,8 @@ export interface ExtractBodyShapeRequest {
 }
 
 export interface ExtractBodyShapeResponse {
-  body_shape: BodyShape
+  // §5: 抽出できた軸のみの partial(手動キーは含まれない)。フロントで per-axis マージする。
+  body_shape: Partial<Record<keyof BodyShape, Partial<BodyShapeAxis>>>
   confidence: number
 }
 

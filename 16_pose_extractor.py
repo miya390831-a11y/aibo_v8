@@ -709,26 +709,118 @@ def _infer_posture_y(kp: dict) -> tuple[float, float]:
     return value, conf
 
 
+def _infer_hips_x(kp: dict) -> tuple[float, float]:
+    """HIP「細い腰 ⇔ ふくよか」= ヒップ/肩 比。keypoint だけで堅牢(既存 base_x と同方式)。"""
+    ls, rs = kp.get("left_shoulder"), kp.get("right_shoulder")
+    lh, rh = kp.get("left_hip"), kp.get("right_hip")
+    if not all([ls, rs, lh, rh]):
+        return 0.0, 0.3
+    shoulder_width = _safe_dist(ls, rs)
+    hip_width = _safe_dist(lh, rh)
+    if not shoulder_width or not hip_width:
+        return 0.0, 0.3
+    ratio = hip_width / max(shoulder_width, 1e-6)        # ヒップ/肩 比
+    value = _normalize_to_range(ratio, 0.75, 1.15)       # 既存軸と同じ _normalize_to_range(実機 1shot で調整可)
+    conf = (ls[2] + rs[2] + lh[2] + rh[2]) / 4.0
+    return value, conf
+
+
+def _infer_hips_y(_kp: dict) -> tuple[float, float]:
+    """HIP「ヒップ位置 低 ⇔ 高」。keypoint からの安定推定が難しいため手動のみ(0固定)。
+    既存 _infer_base_y と同じく low-conf の 0 を返す(スライダー手動編集可・辞書側で y を解釈)。"""
+    return 0.0, 0.3
+
+
+def _infer_shoulder_x(kp: dict) -> tuple[float, float]:
+    """SHOULDER「狭い肩 ⇔ 広い肩」= 肩幅/身長 比(§5)。keypoint だけで堅牢。"""
+    ls, rs = kp.get("left_shoulder"), kp.get("right_shoulder")
+    nose = kp.get("nose")
+    foot = kp.get("left_ankle") or kp.get("right_ankle")
+    if not all([ls, rs, nose, foot]):
+        return 0.0, 0.3
+    shoulder_width = _safe_dist(ls, rs)
+    full_height = _safe_dist(nose, foot)
+    if not shoulder_width or not full_height:
+        return 0.0, 0.3
+    ratio = shoulder_width / max(full_height, 1e-6)       # 肩幅/身長(肩幅基準=身長)
+    value = _normalize_to_range(ratio, 0.18, 0.28)        # 実機 1shot で調整可
+    conf = (ls[2] + rs[2]) / 2.0
+    return value, conf
+
+
+def _infer_shoulder_y(kp: dict) -> tuple[float, float]:
+    """SHOULDER「なで肩 ⇔ いかり肩」= 左右肩 keypoint の Y 差(傾き)(§5)。
+    NOTE: frontal 対称姿勢では ~0(中央)に寄る弱信号。値が出ない場合は手動調整で補う。
+    左右非対称(肩ライン傾斜)時に いかり肩側へ寄る符号。要・実機検証(司令部レビュー対象)。"""
+    ls, rs = kp.get("left_shoulder"), kp.get("right_shoulder")
+    nose = kp.get("nose")
+    foot = kp.get("left_ankle") or kp.get("right_ankle")
+    if not all([ls, rs, nose, foot]):
+        return 0.0, 0.3
+    full_height = _safe_dist(nose, foot)
+    if not full_height:
+        return 0.0, 0.3
+    rel = abs(ls[1] - rs[1]) / max(full_height, 1e-6)     # 左右肩の Y 差(正規化)
+    value = _normalize_to_range(rel, 0.0, 0.05)
+    conf = (ls[2] + rs[2]) / 2.0
+    return value, conf
+
+
+def _infer_legs_x(kp: dict) -> tuple[float, float]:
+    """LEGS「短い脚 ⇔ 長い脚」= (hip→ankle 長)/胴長(neck→hip)比(§5)。"""
+    lh, rh = kp.get("left_hip"), kp.get("right_hip")
+    neck = kp.get("neck")
+    ankle = kp.get("left_ankle") or kp.get("right_ankle")
+    if lh and rh:
+        hip = ((lh[0] + rh[0]) / 2, (lh[1] + rh[1]) / 2, (lh[2] + rh[2]) / 2)
+    else:
+        hip = lh or rh
+    if not hip or not neck or not ankle:
+        return 0.0, 0.3
+    leg_len = _safe_dist(hip, ankle)
+    torso_len = _safe_dist(neck, hip)
+    if not leg_len or not torso_len:
+        return 0.0, 0.3
+    ratio = leg_len / max(torso_len, 1e-6)                # 脚長/胴長
+    value = _normalize_to_range(ratio, 1.1, 1.7)          # 実機 1shot で調整可
+    conf = (hip[2] + ankle[2]) / 2.0
+    return value, conf
+
+
 def infer_body_shape(keypoints: dict[str, tuple[float, float, float]]) -> tuple[dict[str, dict[str, float]], float]:
-    values_with_conf = [
-        _infer_base_x(keypoints),
-        _infer_base_y(keypoints),
-        _infer_proportion_x(keypoints),
-        _infer_proportion_y(keypoints),
-        _infer_silhouette_x(keypoints),
-        _infer_silhouette_y(keypoints),
-        _infer_curves_x(keypoints),
-        _infer_curves_y(keypoints),
-        _infer_posture_x(keypoints),
-        _infer_posture_y(keypoints),
+    # §5 再キー: proportion.x=頭身(旧 proportion.y の算出), legs.x=脚長, shoulder.x/y=新規。
+    base_x = _infer_base_x(keypoints)
+    base_y = _infer_base_y(keypoints)
+    proportion_x = _infer_proportion_y(keypoints)   # §5: 頭身算出を PROPORTION.x へ
+    silhouette_x = _infer_silhouette_x(keypoints)   # §3: メリハリ(現状の算出を維持)
+    curves_x = _infer_curves_x(keypoints)
+    curves_y = _infer_curves_y(keypoints)
+    posture_x = _infer_posture_x(keypoints)
+    posture_y = _infer_posture_y(keypoints)
+    hips_x = _infer_hips_x(keypoints)
+    hips_y = _infer_hips_y(keypoints)
+    shoulder_x = _infer_shoulder_x(keypoints)
+    shoulder_y = _infer_shoulder_y(keypoints)
+    legs_x = _infer_legs_x(keypoints)
+
+    extracted = [
+        base_x, base_y, proportion_x, silhouette_x, curves_x, curves_y,
+        posture_x, posture_y, hips_x, hips_y, shoulder_x, shoulder_y, legs_x,
     ]
-    axis_confidences = [max(0.0, min(1.0, c)) for _, c in values_with_conf]
+    axis_confidences = [max(0.0, min(1.0, c)) for _, c in extracted]
+
+    # §5 手動キー(proportion.y / silhouette.y / legs.y / bust.*)は **含めない**。
+    #     抽出 result は「抽出できた軸のみの partial dict」。後段(server→フロント)で
+    #     per-axis マージし、手動値/初期値を保持する。
     body_shape = {
-        "base": {"x": values_with_conf[0][0], "y": values_with_conf[1][0]},
-        "proportion": {"x": values_with_conf[2][0], "y": values_with_conf[3][0]},
-        "silhouette": {"x": values_with_conf[4][0], "y": values_with_conf[5][0]},
-        "curves": {"x": values_with_conf[6][0], "y": values_with_conf[7][0]},
-        "posture": {"x": values_with_conf[8][0], "y": values_with_conf[9][0]},
+        "base": {"x": base_x[0], "y": base_y[0]},
+        "proportion": {"x": proportion_x[0]},
+        "silhouette": {"x": silhouette_x[0]},
+        "curves": {"x": curves_x[0], "y": curves_y[0]},
+        "posture": {"x": posture_x[0], "y": posture_y[0]},
+        "hips": {"x": hips_x[0], "y": hips_y[0]},
+        "shoulder": {"x": shoulder_x[0], "y": shoulder_y[0]},
+        "legs": {"x": legs_x[0]},
     }
     overall_conf = sum(axis_confidences) / len(axis_confidences) if axis_confidences else 0.0
     return body_shape, overall_conf
@@ -741,6 +833,7 @@ def _zero_body_shape() -> dict[str, dict[str, float]]:
         "silhouette": {"x": 0.0, "y": 0.0},
         "curves": {"x": 0.0, "y": 0.0},
         "posture": {"x": 0.0, "y": 0.0},
+        "hips": {"x": 0.0, "y": 0.0},
     }
 
 
