@@ -55,7 +55,7 @@ logging.basicConfig(
 logger = logging.getLogger("AIBO_v7")
 
 # ─── Phase 3 ハイブリッド γ パラメータ ───
-PHASE3_ENABLED: bool = True
+PHASE3_ENABLED: bool = False  # v8: portrait 恒久化で phase3 パージ(GFPGAN no-op・~6s 浮き)。復活=True
 
 # ─── Phase 3 細粒度制御 (Cursor #2 v2 · v3 hotfix で 3b デフォルト変更) ───
 PHASE3A_ENABLED: bool = True  # GFPGAN による低周波構造補正
@@ -301,7 +301,7 @@ class GenerationConfig:
     seed: int = -1                        # -1 = random
 
     # Pass 2 (顔リファイン)
-    enable_pass2: bool = True
+    enable_pass2: bool = False  # v8: portrait 恒久化で pass2 OFF(EXP-033 検証構成と一致・PO承認)。復活=True
     pass2_strength: float = 0.34         # 旧 0.45 → 0.34
     pass2_pulid_boost: float = 1.25      # 旧 1.5 → 1.25
 
@@ -580,7 +580,7 @@ class SystemConfig:
     hyper_flux_repo: str = "ByteDance/Hyper-SD"
     hyper_flux_filename: str = "Hyper-FLUX.1-dev-8steps-lora.safetensors"
     hyper_flux_weight: float = 0.125
-    enable_hyper_flux: bool = True  # 8step 加速 LoRA · UI で OFF 切替可能
+    enable_hyper_flux: bool = False  # v8: portrait 恒久 no-Hyper(Hyper は肌を殺す)。復活=True
 
     # ─── 動作フラグ ───
     enable_pulid: bool = True

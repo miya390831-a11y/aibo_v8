@@ -844,7 +844,33 @@ class CharacterOrchestrator:
                     except Exception as e:
                         logger.info(f"  ℹ️ pulid_model GPU 復帰スキップ: {e}")
 
-            output = self.pm.pipe_base(**kwargs)
+            # ─── OSS sigma 注入(portrait pass1・案①恒久化・EXP-033 確定)───
+            _oss = None
+            try:
+                _pm04 = import_module("04_pipeline_manager")
+                _oss = _pm04.oss_sigmas(steps)
+                self.pm._oss_force_sigmas = _oss
+            except Exception as _e:
+                logger.warning(f"[OSS] sigma 準備失敗・既定scheduleで続行: {_e}")
+                self.pm._oss_force_sigmas = None
+            try:
+                output = self.pm.pipe_base(**kwargs)
+            finally:
+                self.pm._oss_force_sigmas = None   # pass1 専用に即時 disarm
+            # 適用検証(軽量・常駐): 注入値 vs 実使用 scheduler.sigmas
+            if _oss is not None:
+                try:
+                    _used = [float(x) for x in
+                             self.pm.pipe_base.scheduler.sigmas.detach().float().cpu().tolist()][:-1]
+                    if len(_used) == len(_oss):
+                        _maxd = max(abs(a - b) for a, b in zip(_used, _oss))
+                        (logger.info if _maxd < 1e-3 else logger.warning)(
+                            f"[OSS] APPLIED n={len(_oss)} maxΔ={_maxd:.5f} "
+                            f"{'✓' if _maxd < 1e-3 else '⚠️ FALLBACK/二重シフト疑い'}")
+                    else:
+                        logger.warning(f"[OSS] step 不一致 inj={len(_oss)} used={len(_used)} → 既定fallback疑い")
+                except Exception as _e:
+                    logger.warning(f"[OSS] 適用検証スキップ: {_e}")
 
             # 🥷 v7.2.1 Patch A.3: AIBO_FORCE_OFFLOAD=1 のときのみ CPU 退避
             if os.environ.get("AIBO_FORCE_OFFLOAD", "0") == "1":

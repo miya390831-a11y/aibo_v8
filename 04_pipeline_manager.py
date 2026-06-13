@@ -53,6 +53,7 @@ from pathlib import Path
 from types import MethodType
 from typing import Any, Optional
 
+import numpy as np
 import torch
 from PIL import Image
 
@@ -83,6 +84,31 @@ except ImportError:
     FluxMultiControlNetModel = None  # type: ignore
     _MULTI_CN_AVAILABLE = False
     logger.warning("⚠️ FluxMultiControlNetModel 利用不可 · 単体 CN にフォールバック")
+
+# ─── OSS (Optimal Stepsize, arXiv:2503.21774) sigma 恒久注入(EXP-033 確定)───
+# 出所: 公式 ComfyUI OptimalStepsScheduler の NOISE_LEVELS["FLUX"](10step ネイティブ11値)。
+# log線形補間で N∈[14,28] の OSS 最終sigma を返す。EXP-033 で OSS APPLIED ✓ maxΔ=0.0 検証済。
+OSS_FLUX_NOISE_LEVELS = [0.9968, 0.9886, 0.9819, 0.975, 0.966, 0.9471,
+                         0.9158, 0.8287, 0.5512, 0.2808, 0.001]
+
+
+def _oss_loglinear_interp(t_steps, num_steps):
+    xs = np.linspace(0, 1, len(t_steps))
+    ys = np.log(np.array(t_steps)[::-1])
+    new_ys = np.interp(np.linspace(0, 1, num_steps), xs, ys)
+    return np.exp(new_ys)[::-1].copy()
+
+
+def oss_sigmas(n_steps):
+    """N step 用の OSS 最終sigma(非ゼロ N 値)。N は [14,28] にクランプ。"""
+    n = int(max(14, min(28, n_steps)))
+    s = list(OSS_FLUX_NOISE_LEVELS)
+    if (n + 1) != len(s):
+        s = list(_oss_loglinear_interp(s, n + 1))
+    s = s[-(n + 1):]
+    s[-1] = 0.0
+    return [float(x) for x in s[:-1]]
+
 
 # ─── Stage 3e: Nunchaku 互換性ヘルパー ─────────────────────────────
 class _DummyEncoderHidProj:
@@ -596,6 +622,52 @@ class FluxA100PipelineManager:
         self._seal_fbcache()
 
         logger.info("✅ [Nunchaku 経路] 構築完了")
+
+        # ─── OSS sigma hook 装着(案①恒久化・portrait pass1 専用・flag-gated)───
+        # pipe_i2i は pipe_base.scheduler を共有するため pipe_base に1回装着で pass1/pass2 両カバー。
+        self._install_oss_sigma_hook()
+
+    def _install_oss_sigma_hook(self):
+        """pipe_base.scheduler.set_timesteps を wrap し、_run_pass1 がセットした
+        self._oss_force_sigmas を最終sigma として上書き(案①恒久化・二重シフト無効・
+        diffusers バージョン非依存)。flag が None の呼出し(pass2 等)は素通し。"""
+        import functools
+        sched = getattr(self, "pipe_base", None)
+        sched = getattr(sched, "scheduler", None)
+        if sched is None:
+            logger.warning("  ⚠️ [OSS] pipe_base.scheduler が無く hook 未装着")
+            return
+        if getattr(sched, "_oss_hook_installed", False):
+            return
+        self._oss_force_sigmas = None
+        self._oss_last_applied = None
+        _orig = sched.set_timesteps
+
+        @functools.wraps(_orig)
+        def _wrapped(*args, **kwargs):
+            _orig(*args, **kwargs)
+            fs = getattr(self, "_oss_force_sigmas", None)
+            if fs is not None:
+                dev = sched.sigmas.device
+                dt = sched.sigmas.dtype
+                ntt = float(getattr(sched.config, "num_train_timesteps", 1000) or 1000)
+                s = torch.tensor(list(fs) + [0.0], dtype=dt, device=dev)
+                sched.sigmas = s
+                sched.timesteps = (s[:-1] * ntt).to(dev)
+                try:
+                    sched.num_inference_steps = len(fs)
+                except Exception as _e_nis:
+                    logger.debug(f"  [OSS] num_inference_steps 設定スキップ: {_e_nis}")
+                try:
+                    self._oss_last_applied = [round(float(x), 5)
+                                              for x in sched.sigmas.detach().float().cpu().tolist()]
+                except Exception as _e_la:
+                    self._oss_last_applied = None
+                    logger.debug(f"  [OSS] last_applied 記録スキップ: {_e_la}")
+
+        sched.set_timesteps = _wrapped
+        sched._oss_hook_installed = True
+        logger.info("  🧩 [OSS] sigma hook 装着(set_timesteps wrap・flag-gated・portrait pass1 専用)")
 
     def ensure_controlnet(self):
         """

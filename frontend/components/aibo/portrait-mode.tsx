@@ -102,7 +102,7 @@ export function PortraitMode({
   const [negativePrompt, setNegativePrompt] = useState(DEFAULT_NEGATIVE)
   const [randomSeed, setRandomSeed] = useState(true)
   const [manualSeed, setManualSeed] = useState("")
-  const [steps, setSteps] = useState(8)
+  const [steps, setSteps] = useState(14)
   const [cfg, setCfg] = useState(4.0)
   const [bodyShape, setBodyShape] = useState<BodyShape>({
     base: { x: 0, y: 0 },
@@ -394,7 +394,7 @@ export function PortraitMode({
     setNegativePrompt(DEFAULT_NEGATIVE)
     setManualSeed("")
     setRandomSeed(true)
-    setSteps(8)
+    setSteps(14)
     setCfg(4.0)
     setBodyShape({
       base: { x: 0, y: 0 },
@@ -520,7 +520,7 @@ export function PortraitMode({
             <span>DETAIL SETTINGS</span>
           </summary>
           <div className="mt-3 space-y-3">
-            <Slider label="STEPS" value={steps} min={1} max={30} onChange={setSteps} />
+            <Slider label="画質(STEPS)" value={steps} min={14} max={28} onChange={setSteps} />
             <Slider label="CFG" value={cfg} min={1} max={10} step={0.1} onChange={setCfg} />
           </div>
         </details>
