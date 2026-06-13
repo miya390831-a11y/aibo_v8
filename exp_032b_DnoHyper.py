@@ -8,24 +8,12 @@
 #   B   — 既存 skin_abl_B_gfpgan_off.png 流用
 #
 # ─────────────────────────────────────────────────────────────────────────
-# ★実行手順(必ずこの順・別 fresh runtime):
+# ★実行手順(必ずこの順・別 fresh runtime・各ステップ 1行 exec):
 #   1) ランタイム再起動:
 #        import os; os.kill(os.getpid(), 9)
-#   2) 再起動後、**Cell 0 / setup を走らせる前に** 下記を実行(Hyper を載せない構築にする):
-#        import importlib, inspect
-#        cfg = importlib.import_module("01_config")
-#        SC = cfg.SystemConfig
-#        _names = [p.name for p in inspect.signature(SC.__init__).parameters.values() if p.name != "self"]
-#        _defs = list(SC.__init__.__defaults__ or ())
-#        _defaulted = _names[-len(_defs):] if _defs else []
-#        for _nm, _val in (("enable_hyper_flux", False), ("hyper_flux_weight", 0.0)):
-#            if _nm in _defaulted:
-#                _defs[_defaulted.index(_nm)] = _val
-#                setattr(SC, _nm, _val)
-#        SC.__init__.__defaults__ = tuple(_defs)
-#        print("[prebuild] SystemConfig defaults patched: enable_hyper_flux=False, hyper_flux_weight=0.0")
-#      ※ dataclass の既定は __init__ に焼かれるため class 属性代入だけでは効かない → __defaults__ を書換。
-#      ※ 02_colab_setup が import 時に SystemConfig を束縛しても同一クラスオブジェクトなので有効。
+#   2) 再起動後、**Cell 0 / setup を走らせる前に** prebuild を実行(Hyper を載せない構築にする):
+#        exec(open("/content/drive/MyDrive/aibo_v7/exp_032b_prebuild.py", encoding="utf-8").read())
+#      (= SystemConfig 既定を enable_hyper_flux=False / hyper_flux_weight=0.0 に書換 + 自己検証)
 #   3) Cell 0 / setup を実行(= Hyper 未ロードのスタックが構築される)。
 #   4) 本セルを実行:
 #        exec(open("/content/drive/MyDrive/aibo_v7/exp_032b_DnoHyper.py", encoding="utf-8").read())
