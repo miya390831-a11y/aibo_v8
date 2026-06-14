@@ -845,6 +845,16 @@ class CharacterOrchestrator:
                         logger.info(f"  ℹ️ pulid_model GPU 復帰スキップ: {e}")
 
             # ─── OSS sigma 注入(portrait pass1・案①恒久化・EXP-033 確定)───
+            # [DIAG] inject-point 到達証跡(logging only・生成非改変)。
+            #   この行が本番ログに出ない = 実行中の 05 が OSS ブロック未搭載
+            #   (04/05 desync・stale module)を意味する=GATE① ❌(OSS='None')の真因判定。
+            #   hook_on_live_sched= は「これから叩く scheduler に wrap が乗ってるか」
+            #   = 仮説(a) stale-wrap の即時判定材料。
+            _sched_dbg = getattr(getattr(self.pm, "pipe_base", None), "scheduler", None)
+            logger.info(
+                f"🧩 [OSS] inject-point reached: route=_run_pass1 steps={steps} "
+                f"hook_on_live_sched={getattr(_sched_dbg, '_oss_hook_installed', False)}"
+            )
             _oss = None
             try:
                 _pm04 = import_module("04_pipeline_manager")
