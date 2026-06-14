@@ -53,3 +53,24 @@ Colab は `.py` を G:\マイドライブ\aibo_v7\ 経由でロードする。Dr
 - B2 は __file__(=ディスク)の md5 を見る。**「旧モジュールを import 済のまま .py だけ更新して再起動しない」**
   ケースは、ディスクが新でもメモリが旧になり得る。→ だから **B3(必ず再起動)** が対。
   再起動さえすれば sys.modules は新規 import され、ディスク=メモリ=manifest が一致する。
+
+## ★事例: DriveFS clobber(2026-06-14・03/07)
+manifest ガードが build STOP(設計通り)。原因は **「sync 完了 ≠ 正しい中身」**:
+- `.errorfix/sync_modules_v3.ps1` は `RESULT: ALL-MATCH` を出した(G:\ への書込み直後は正)。
+  だが後刻、G:\ の 03/07 が **mtime 新しいのに中身は旧**(committed と不一致)に化けていた。
+  → Google **DriveFS**(`%LOCALAPPDATA%\Google\DriveFS` 仮想マウント = G:)が、
+  **クラウド側の旧版を local 書込みに被せて revert** していた(= clobber)。mtime は revert 時刻で更新されるため
+  「新しい=最新」に見えるが中身は旧。**mtime も sync 成功表示も、中身が正しい証拠にならない。**
+- 切り分け(git 実測): `git show <commit>:<file>` を **同じ正規化(CRLF→LF→md5[:8])** して
+  manifest 期待値と突合。
+  - committed 正規化 md5 == 期待値、Drive == 旧 → **Drive が古い(本件)**。
+  - committed 正規化 md5 == 旧(=未改変なのに manifest が別値) → **manifest 生成バグ**(編集中/未保存から記録)。
+    → 実 committed から `python tools/gen_manifest.py` で再生成。
+- **確実な復旧手段**: clobber は desktop 経由(G:\ 書込み)では負ける。
+  **Drive Web UI(drive.google.com → MyDrive/aibo_v7)で正版を手動アップロード**=クラウドへ直書きし、
+  DriveFS の stale キャッシュをバイパスする。アップ後、PO の正規化 md5 セルで **expected 一致**を確認してから
+  Colab 再起動。
+- 教訓3点(運用に固定):
+  1. **sync 完了 ≠ 正しい中身**(mtime 新でも中身旧があり得る)。証拠は常に「正規化 md5 == expected」。
+  2. **DriveFS clobber 時は Web UI 手動アップ**(desktop 同期は当てにしない)。
+  3. **manifest 期待値は必ず実 committed から生成**(編集中バッファから作らない)。
