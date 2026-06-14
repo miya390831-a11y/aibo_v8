@@ -339,6 +339,12 @@ class AiboMain:
 
         t0_total = time.perf_counter()
 
+        # ─── Phase 0 · module-manifest preflight(恒久対策 B2・検証のみ・生成非改変)───
+        #   committed manifest と runtime モジュールの md5 を照合。silent な desync
+        #   (例 04新/05旧)を build 前に大声で検出して STOP する。GATE① の真因の再発防止。
+        #   ツール不在/import 不可なら warn して続行(ガード未導入環境は壊さない)。
+        self._verify_module_manifest_preflight()
+
         if not self.phase_a_bootstrap():
             return False
         if not self.phase_b_resolve_strategy():
@@ -370,6 +376,36 @@ class AiboMain:
             except Exception:
                 print("⏭️ Phase G (Gradio) スキップ · A方式運用")
             return True
+
+    # ────────────────────────────────────────
+    # Phase 0 · module-manifest preflight(恒久対策 B2)
+    # ────────────────────────────────────────
+
+    def _verify_module_manifest_preflight(self) -> None:
+        """tools/check_manifest.verify_module_manifest() を呼び、committed manifest と
+        runtime モジュールの md5 desync を build 前に検出する。検証のみ(生成非改変)。
+        desync(strict)時は SystemExit で即死。ツール不在/import 不可は warn して続行。"""
+        import os
+        try:
+            try:
+                checker = import_module("tools.check_manifest")
+            except Exception:
+                # namespace package が解決できない環境向けの file ロードフォールバック
+                import importlib.util
+                here = os.path.dirname(os.path.abspath(__file__))
+                p = os.path.join(here, "tools", "check_manifest.py")
+                if not os.path.exists(p):
+                    self.logger.warning(f"⚠️ [manifest] checker 不在({p})→ preflight skip")
+                    return
+                spec = importlib.util.spec_from_file_location("aibo_check_manifest", p)
+                checker = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(checker)
+            checker.verify_module_manifest(strict=True)
+        except SystemExit:
+            # desync 検出 = 意図した即死。build を止める。
+            raise
+        except Exception as e:
+            self.logger.warning(f"⚠️ [manifest] preflight 実行不可(続行): {e}")
 
     # ────────────────────────────────────────
     # サマリーログ

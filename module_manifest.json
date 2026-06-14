@@ -1,0 +1,19 @@
+{
+  "_comment": "AIBO core module md5 (newline-normalized LF). regen: python tools/gen_manifest.py  |  verify: tools/check_manifest.py",
+  "modules": {
+    "01_config.py": "c7d16e5d7366c80b56bcfa378f3c775a",
+    "02_colab_setup.py": "7e53e4ccef16454da1730178d61ab071",
+    "03_identity_engine.py": "a75561986db3a0ff45c355cc92b0706a",
+    "04_pipeline_manager.py": "045100c0deb4412a4be15a59a9c4a587",
+    "05_orchestrator.py": "4055f4a5f461192203c47d55a8aae6ab",
+    "06_ui.py": "4a3232f32e7f1bde13d0fecc660a81c4",
+    "07_main.py": "6e7f8a1a60cddcc96a85c1636d93168c",
+    "08_face_refiner.py": "48cd93f6eb0a141190e9e505fd95afe0",
+    "09_fastapi_server.py": "ddd35c2a2c1246fb938fc88e5a221c4f",
+    "10_mask_engine.py": "5358f699fdca01345495c902e7540fcb",
+    "11_pulid_cn_pipeline.py": "11005606b117195472fc99d8b8f00917",
+    "15_makeup_engine.py": "922fca019402499dc3aed605b82c0681",
+    "16_pose_extractor.py": "5370cb946e4b5b3026ad7d704e8c38b0",
+    "17_neutralize_engine.py": "36f0de3668a0f8384053830d67559157"
+  }
+}
