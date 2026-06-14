@@ -74,3 +74,21 @@ manifest ガードが build STOP(設計通り)。原因は **「sync 完了 ≠ 
   1. **sync 完了 ≠ 正しい中身**(mtime 新でも中身旧があり得る)。証拠は常に「正規化 md5 == expected」。
   2. **DriveFS clobber 時は Web UI 手動アップ**(desktop 同期は当てにしない)。
   3. **manifest 期待値は必ず実 committed から生成**(編集中バッファから作らない)。
+
+## ★根治: code 同期を GitHub transport へ移管(2026-06-14 確定)
+DriveFS の双方向同期が clobber の根。**code を Drive から外し GitHub(exact commit)に移す**ことで
+構造的に解消する。新アーキ = **code=GitHub / data=Drive / models=HF**。
+- **code**: notebook Cell 0 が `aibo_v8` の `sync/colab` を clone/fetch → exact commit checkout →
+  `AIBO_ROOT=/content/aibo_src`(repo 直下に *.py)。clone した版がそのまま動く=部分 desync 不能・
+  version pin 明示(Cell 0 が `@ <sha8>` を print)。PAT は **Colab Secrets `GH_PAT`**(コード/chat 直書き禁止)。
+- **data**: refs `/content/drive/MyDrive/顔/` / outputs `…/aibo_v7/experiments/` は Drive 絶対パスのまま。
+  Colab `drive.mount` は **PC の Drive デスクトップアプリ非依存**(Google へ直接認証)→ PC アプリ撤去で無影響。
+- **models**: HF Hub → `/content/aibo_hf_cache`(NVMe)直 DL(従来通り・Drive 非経由)。
+- **PC 側**: Google Drive デスクトップ(DriveFS)は **code に使わない**(撤去 or 自動起動 OFF+完全終了)。
+  `G:\マイドライブ\…` ローカルミラーは消えて可(code=GitHub、refs は cloud に存在)。
+- **旧経路の扱い**: DriveFS 4拠点 sync(`.errorfix/sync_modules_v3.ps1`)は **code 用は廃止**(git push に置換)。
+  manifest ガード(B2)は維持 = GitHub pull の取り違え/branch ずれを引き続き検出。
+- **パス監査(移行時)**: code dir 変更で壊れるのは **code-path を Drive 直書きしてるセルのみ**。
+  本リポでは `exp_portrait_verify_oneshot.py` の `sys.path/chdir` を `/content/aibo_src` へ更新済。
+  data-path(`MyDrive/顔` `MyDrive/aibo_v7/experiments`)は絶対 Drive のまま変更不要。
+- **revert**: 旧 Drive code 経路は notebook の `AIBO_ROOT` を戻すだけ(branch 上で即可逆)。

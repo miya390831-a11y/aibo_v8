@@ -44,21 +44,28 @@
 - これらは `.errorfix/guard_forbidden.py`(PreToolUse フック)で機械的にもブロックされる
 
 ## repo 運用規約
-- 同期: 4拠点(C:\Users\yuuki\aibo_v7\ 主 / Downloads\AIBOV7\ / \3a\ / G:\マイドライブ\aibo_v7\)
-- push: `master` と `colab-stable` の両方
+- ★同期アーキテクチャ(2026-06-14 確定): **code=GitHub / data=Drive / models=HF**。
+  - **code**: Colab は `aibo_v8` の `sync/colab` ブランチを clone/fetch → exact commit を checkout
+    (notebook Cell 0)。**DriveFS は code に使わない**(古い local キャッシュを cloud に押し戻す
+    clobber の温床だったため・GATE① の真因)。PC は `git push origin sync/colab`(main は parked)。
+  - **data**: refs(`/content/drive/MyDrive/顔/`)/ outputs(`…/aibo_v7/experiments/`)は Drive のまま。
+    Colab の `drive.mount` は PC アプリ非依存(Google へ直接認証)。
+  - **models**: HF Hub から `/content/aibo_hf_cache`(NVMe)へ直 DL(Drive 非経由)。
+- push: code transport は `sync/colab`。`master` は parked(release は PO 判断)。`colab-stable` は別運用。
 - ログ: 完了報告は `logs/report_<タスク番号>_<timestamp>.md`
 - Colab: 修正反映後の再 run は手動(`os.kill(os.getpid(), 9)`)
 
 ### module desync 防止(★恒久ルール・GATE① 教訓 2026-06-14)
-Drive sync は単独で不確実(部分失敗で 04 新 / 05 旧 の silent desync → 注入未発火等の沈黙バグ)。
-「sync した」は証拠ではない。**「md5 一致」と「manifest preflight 緑」が証拠。**
-1. **sync は md5 自己検証付きで:** `.errorfix/sync_modules_v3.ps1`(全コア .py + manifest + tools を
-   4拠点コピー → src↔dest md5 比較 → 不一致は loud FAIL/exit1)。RESULT: ALL-MATCH を確認してから再起動。
+silent desync(04 新 / 05 旧 等 → 注入未発火等の沈黙バグ)を構造的に殺す。
+「sync した」は証拠ではない。**「exact commit」と「manifest preflight 緑」が証拠。**
+1. **code は GitHub transport(exact commit pin):** clone/fetch した版がそのまま動く=部分 desync 不能。
+   DriveFS 経由の旧 .ps1 4拠点 sync(`.errorfix/sync_modules_v3.ps1`)は **code 用は廃止**(git に置換)。
 2. **build 直後は manifest preflight 緑を確認してから実験/検証/ship:** `07_main.run()` 冒頭で
    `tools/check_manifest.verify_module_manifest()` が runtime モジュール(__file__)の md5 を
    committed `module_manifest.json` と照合し、desync なら `[OBS] module manifest …` + STOP。
    コア .py を編集したら **commit 前に `python tools/gen_manifest.py`** で manifest 再生成。
-3. **desync 検出時は Drive Web UI で手動再アップ** → 再 sync → md5 一致を再確認 → Colab 再起動。
+3. **万一 DriveFS clobber 等で旧版が混入したら**: code は GitHub から再取得(exact commit)で確定。
+   旧 Drive code 経路へ戻さない。詳細は `docs/ops/module_desync_guard.md`。
 
 ## エラー対応(ドクトリン B)
 - 常駐ウォッチャー `.errorfix/watch_errorfix.py` がエラーを検知 → 当直が診断

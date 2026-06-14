@@ -24,8 +24,8 @@
 # ── ★再起動後の ModuleNotFound 回避(sys.path + chdir・3行)──────────────────
 import sys
 import os
-sys.path.insert(0, "/content/drive/MyDrive/aibo_v7")
-os.chdir("/content/drive/MyDrive/aibo_v7")
+sys.path.insert(0, "/content/aibo_src")   # code=GitHub clone(DriveFS 非経由)。data は Drive 絶対パス
+os.chdir("/content/aibo_src")
 
 import time
 import logging
