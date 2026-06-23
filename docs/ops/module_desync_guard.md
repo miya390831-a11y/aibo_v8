@@ -112,3 +112,23 @@ PO 実機で `/content/aibo_src/03` を測ると **3b297f80(旧)**・mtime=Cell0
   後段で上書きし得る。manifest 検証は **transport 直後だけでなく起動 side effect の後にも**置く。
   根治には writer の発生源(常駐プロセス/Drive スクリプト)を特定して止める必要があり、本ガードはその特定を
   次回 1 実行で完了させるためのもの。
+
+## ★真因確定: Colab で git checkout/reset が rc=0 詐欺。materialize は cat-file→直書きが唯一信頼できる(2026-06-23)
+4 周ループの真因が PO 実機で確定。**この Colab 環境では `git checkout` / `git reset --hard` / `git checkout-index`
+が rc=0 を返すのに working tree を書かない**(= rc=0 詐欺。`check=True` も `-C` も env 無害化も無意味)。
+- 証拠: `HEAD:03 blob=a820b6eb`(正)≠ `hash-object 03(disk)=24113acf`(旧)が reset/checkout-index 後も継続。
+  disk md5=3b297f80(旧)。一方 **`git cat-file -p HEAD:<f>` の blob 読み出しは正常**で、Python で
+  `open(fp,"wb").write(blob)` すると一発で正版(全14コアを PO が実証: 03=a7556198 / 07=6e7f8a1a / 05=4055f4a5 …)。
+- これまでの「Drive 旧で上書き」説は誤認。実体は **checkout が working tree を一切更新せず、clone 先に残った
+  旧ファイル(or 空)をそのまま放置**していた。`disk md5==manifest` の PASS 誤報も、checkout 後に測る位置次第で説明可能。
+- **根治(materialize の置換)**: working tree は git checkout 系で作らない。**HEAD tree の全 tracked を
+  `git ls-tree -r --name-only HEAD` で列挙 → 各 blob を `git cat-file -p HEAD:<f>` → Python 直書き**で materialize。
+  直後に `disk md5 == module_manifest.json` を assert(silent fail 禁止)。`sys.dont_write_bytecode=True` +
+  `__file__` ベース purge + `invalidate_caches()` も併用。Cell 0 transport に実装(rev catfile-fix)。
+- **enumerate は `ls-tree`(commit tree)で**:`git ls-files`(index)は `--no-checkout`/checkout 詐欺時に空に
+  なり 0 件 materialize になる。`ls-tree -r HEAD` は object graph を読むので index/working-tree 状態に依存しない。
+- **原因の推定(任意)**: Colab の overlayfs/特定 git バージョンで checkout の working-tree 書込み段が黙って no-op。
+  cat-file は object store の read のみで成立するため影響を受けない。原因究明より**回避策(cat-file 直書き)が本線**。
+- **今すぐ build(GATE① を当日通す)**: Cell 0 に `SKIP_TRANSPORT=True` 分岐。既に全コア materialize 済みの
+  `/content/aibo_src` をそのまま使い、clone/materialize を skip して import→build→起動。md5 assert が
+  「本当に materialize 済みか」を検証してから build に進む。
