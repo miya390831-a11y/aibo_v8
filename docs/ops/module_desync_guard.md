@@ -92,3 +92,23 @@ DriveFS の双方向同期が clobber の根。**code を Drive から外し Git
   本リポでは `exp_portrait_verify_oneshot.py` の `sys.path/chdir` を `/content/aibo_src` へ更新済。
   data-path(`MyDrive/顔` `MyDrive/aibo_v7/experiments`)は絶対 Drive のまま変更不要。
 - **revert**: 旧 Drive code 経路は notebook の `AIBO_ROOT` を戻すだけ(branch 上で即可逆)。
+
+## ★事例: transport は正なのに「起動 side effect が Drive 旧版を aibo_src に上書き」疑い(2026-06-23)
+GATE① 前ブロッカーの 4 周目。Cell 0 transport の `disk md5==manifest` が **PASS した直後**(=clone は正版)に、
+PO 実機で `/content/aibo_src/03` を測ると **3b297f80(旧)**・mtime=Cell0 直後・**中身は Drive 旧 03 と完全一致**。
+→ transport 後の何かが `/content/drive/MyDrive/aibo_v7` の旧コードを aibo_src に被せている、という症状。
+- **コード調査の結論(重要)**: `sync/colab` の全 `.py` を grep した結果、**Drive→aibo_src のコード書き戻しは
+  committed code に存在しない**。`aibo_src` は write 対象に一度も現れず、`copytree` は outputs→Drive の
+  正方向のみ、`CacheSync` は未 instantiate、`drive_root` は別フォルダ(あいぼすたじお2)。
+  → 「起動コードが書き戻す」仮説は本ブランチでは裏付けられない。**writer は旧 notebook(DriveFS 期)由来の
+  常駐プロセス/Drive 常駐スクリプト等の runtime 副作用**が濃厚(=クリーン再起動で消える類)。
+- **多層ガード(Cell 0 に実装・59591b8)**: 捏造削除はせず writer を**現認**する instrumentation を追加。
+  - `_snap_core()` が 03/07 の md5+mtime を **post-transport / post-import / post-boot** の 3 点で記録 →
+    どの段で stale 化したか現認。
+  - `AiboMain.run()`(起動 side effect)後に**最終ゲート**: `disk md5 != manifest` なら STOP し診断ダンプ:
+    (a) Drive 旧コードと**内容一致**か(上書き元の同定)、(b) transport 後に **mtime 更新された aibo_src 配下**
+    (writer の足跡)、(c) **生存スレッド**一覧(clobber daemon 捕捉)。
+- **教訓**: GitHub transport で「clone が正」を保証しても、**runtime に残る旧世代の副作用(常駐 sync 等)**が
+  後段で上書きし得る。manifest 検証は **transport 直後だけでなく起動 side effect の後にも**置く。
+  根治には writer の発生源(常駐プロセス/Drive スクリプト)を特定して止める必要があり、本ガードはその特定を
+  次回 1 実行で完了させるためのもの。
