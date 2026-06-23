@@ -132,3 +132,24 @@ PO 実機で `/content/aibo_src/03` を測ると **3b297f80(旧)**・mtime=Cell0
 - **今すぐ build(GATE① を当日通す)**: Cell 0 に `SKIP_TRANSPORT=True` 分岐。既に全コア materialize 済みの
   `/content/aibo_src` をそのまま使い、clone/materialize を skip して import→build→起動。md5 assert が
   「本当に materialize 済みか」を検証してから build に進む。
+
+## ★追確定: cat-file の出力は正でも Cell0 内 write がディスクに反映されない(2026-06-23)
+真因をさらに 1 行に詰めた。PO 実機で同一ファイルを多角測定:
+- `cat-file -p HEAD:03` の中身 md5=a7556198(正・size 77897)/ `disk _norm_md5`=3b297f80(旧・size 77894)/
+  mtime 不変(5回測定)= **Cell 0 後に誰も書き換えていない**(clobber/daemon 否定)。
+- つまり **Cell 0 内の `open(fp,"wb").write(blob)` がディスクに効かず(no-op)**、clone が最初に置いた旧版が残存。
+  **PO が手動で同じ `cat-file→open().write()` を打つと a7556198 に直る** = Cell0 実行コンテキスト固有の write 無効化。
+- 「snap✓ なのに最終ガード✗」の積年の矛盾は、snap が `cat-file 出力`(正)を測り、最終ガードが `実ディスク`(旧)を
+  測っていたため(測定対象の差)。
+- **対策(materialize 書込みを確実化・多層)**:(a) **書込み直後に読み戻して `disk bytes == HEAD blob` を
+  1 ファイルずつ assert**(no-op を書込み地点で検出 → 即 raise)。(b) **clone が置いた旧ファイルを書込み前に
+  物理 `os.remove`**(同一視スキップ/上書き no-op を回避)。(c) **新規 tmp に書いて `flush+os.fsync` →
+  `os.replace`(atomic rename)**(in-place 上書きの no-op 化を回避・lower-layer の影が無いパスへ書く)。
+
+## ★2系統化: Drive に code(.py)を置かない。Drive は data 専用(2026-06-23)
+旧 code(`/content/drive/MyDrive/aibo_v7/*.py` `*.ipynb` `__pycache__`)が各種 clobber/誤 import の弾薬源。
+**code は GitHub(`/content/aibo_src`)のみ・data は Drive のみ・models は HF** の3系統を徹底し、Drive 直下の
+旧 code を**削除**(退避でなく)。notebook に削除セル(DRY-RUN 既定・直下のみ・data 不可侵)を追加。
+- **残す data(絶対パスで実コードが参照)**: `experiments/`(outputs)/ `gfpgan/weights/GFPGANv1.4.pth`(08:323)/
+  `bodyrefs` `depth_ab` `bodycn_ab` `_models/`(exp 用)/ 別 dir `/content/drive/MyDrive/顔/`(refs)/ `aibo_hf_cache`。
+- 以後 **Drive に .py を置かない**(置くと旧 code 経路が復活する)。コア .py の変更は GitHub `sync/colab` push のみ。
