@@ -103,7 +103,7 @@ export function PortraitMode({
   const [randomSeed, setRandomSeed] = useState(true)
   const [manualSeed, setManualSeed] = useState("")
   const [steps, setSteps] = useState(14)
-  const [cfg, setCfg] = useState(4.0)
+  const [cfg, setCfg] = useState(3.5)  // 本番確定値(GATE③ 緑・backend GenerationConfig も 3.5)
   const [bodyShape, setBodyShape] = useState<BodyShape>({
     base: { x: 0, y: 0 },
     proportion: { x: 0, y: 0 },
