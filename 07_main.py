@@ -197,11 +197,11 @@ class AiboMain:
         try:
             self.identity_engine = self.ident.IdentityEngine(self.sys_cfg)
 
-            # ControlNet を pipeline の前に lazy_init (重い · オプション)
-            if self.identity_engine.controlnet:
-                ok = self.identity_engine.controlnet.lazy_init()
-                if not ok:
-                    self.logger.warning("⚠️ ControlNet 初期化失敗 · ControlNet なしで続行")
+            # 起動高速化: 03 ControlNetEngine の FluxControlNetModel(model)は推論で未使用
+            #   (CN 推論は pm.pipe_cnet / pm.controlnet_model 経由・ie.controlnet は preprocess
+            #    detector だけ使用)。よって起動時 eager lazy_init() は撤去。preprocess() は
+            #   controlnet_aux detector を都度ロードするため引き続き機能する(ie.controlnet は
+            #   ControlNetEngine インスタンスとして残り、None 参照で落ちない)。
 
             # IP-Adapter は pipeline.load_ip_adapter() を呼ぶので pipeline build 後に必要
             if self.identity_engine.ip_adapter:

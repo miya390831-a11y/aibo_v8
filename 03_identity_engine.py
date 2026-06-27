@@ -43,6 +43,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import time
 from importlib import import_module
 from pathlib import Path
 from types import MethodType
@@ -984,6 +985,7 @@ class IPAdapterEngine:
 
             # ─── Step 1: CLIP image_encoder 独立ロード ──
             logger.info(f"🔄 [IPAdapterEngine] {self.DEFAULT_IMAGE_ENCODER} ロード中...")
+            _t_enc = time.perf_counter()
             self._image_encoder = CLIPVisionModelWithProjection.from_pretrained(
                 self.DEFAULT_IMAGE_ENCODER,
                 torch_dtype=torch.bfloat16,
@@ -992,6 +994,7 @@ class IPAdapterEngine:
             self._feature_extractor = CLIPImageProcessor.from_pretrained(
                 self.DEFAULT_IMAGE_ENCODER,
             )
+            logger.info(f"[BUILD-TIME] ipadapter_image_encoder load: {time.perf_counter() - _t_enc:.1f}s")
 
             # ─── Step 2: pipeline に一時セット (Diffusers が要求) ──
             # 注: load_ip_adapter 中のみ参照される · 後で Hit & Run で CPU 退避
@@ -1001,11 +1004,13 @@ class IPAdapterEngine:
             # ─── Step 3: IP-Adapter 重みのみ注入 ──
             # image_encoder_folder=None で Diffusers のフォルダ検索を諦めさせる
             logger.info(f"🔄 [IPAdapterEngine] IP-Adapter 重みロード中...")
+            _t_ipa = time.perf_counter()
             pipeline.load_ip_adapter(
                 self.sys_cfg.ip_adapter_repo,
                 weight_name="ip_adapter.safetensors",
                 image_encoder_folder=None,
             )
+            logger.info(f"[BUILD-TIME] load_ip_adapter: {time.perf_counter() - _t_ipa:.1f}s")
 
             # ─── Step 4: 注入結果の検証 ──
             transformer = getattr(pipeline, "transformer", None)
@@ -1155,10 +1160,12 @@ class ControlNetEngine:
 
         try:
             from diffusers import FluxControlNetModel
+            _t_cn = time.perf_counter()
             self.controlnet = FluxControlNetModel.from_pretrained(
                 self.sys_cfg.controlnet_repo,
                 torch_dtype=torch.bfloat16,
             ).to("cuda" if torch.cuda.is_available() else "cpu")
+            logger.info(f"[BUILD-TIME] ControlNetEngine FluxControlNetModel load: {time.perf_counter() - _t_cn:.1f}s")
             logger.info(f"✅ [ControlNetEngine] {self.sys_cfg.controlnet_repo} ロード完了")
             self._initialized = True
             return True

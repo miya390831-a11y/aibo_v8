@@ -941,6 +941,21 @@ class CharacterOrchestrator:
                 logger.warning("⚠️ [Pass 1 CN] forward ラップ未動作 · 手動ラップ実行")
                 self.pm._wrap_transformer_forward_for_cn()
 
+            # ─── 1.5 CN 専用 IP-Adapter 配線(初回 CN 生成で1回だけ・起動 eager を後ろ倒し)──
+            #   旧 notebook Cell-run が起動時 eager にやっていた CN 専用 setup をここへ移植。
+            #   portrait(_run_pass1 / pipe_base)経路は一切触らないため byte 不変。idempotent。
+            pm = self.pm
+            if pm.pipe_cnet is not None and not getattr(pm, "_cnet_ipadapter_wired", False):
+                ipa = self.ie.ip_adapter            # identity_engine の IP-Adapter
+                if getattr(pm.pipe_cnet, "image_encoder", None) is None and ipa is not None:
+                    pm.pipe_cnet.image_encoder = ipa._image_encoder
+                    pm.pipe_cnet.feature_extractor = ipa._feature_extractor
+                # IP-Adapter scale を pipe_cnet にも(Setting A の ip_adapter_weight=IdentityConfig 既定)
+                if ipa is not None:
+                    ipa.set_scale(pm.pipe_cnet, IdentityConfig().ip_adapter_weight)
+                pm._cnet_ipadapter_wired = True
+                logger.info("🔧 [Pass 1 CN] pipe_cnet に CN 専用 IP-Adapter 配線完了(初回1回)")
+
             # ─── 2. CN 入力リスト構築 ─────────────────────────────
             id_cfg_local = self._current_id_cfg
             if id_cfg_local is None:

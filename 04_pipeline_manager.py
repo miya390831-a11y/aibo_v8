@@ -457,6 +457,7 @@ class FluxA100PipelineManager:
 
         logger.info(f"  📥 [1/4] Nunchaku Transformer ロード: {flux_filename}")
         _c0_verify_hf_single("transformer", self.sys_cfg.nunchaku_repo, flux_filename)
+        _t_nc_tf = time.perf_counter()
         try:
             self._shared_transformer = NunchakuFluxTransformer2dModel.from_pretrained(
                 flux_model_id,
@@ -467,6 +468,7 @@ class FluxA100PipelineManager:
             self._shared_transformer = NunchakuFluxTransformer2dModel.from_pretrained(
                 flux_model_id,
             )
+        logger.info(f"[BUILD-TIME] nunchaku_transformer.from_pretrained: {time.perf_counter() - _t_nc_tf:.1f}s")
 
         # ─── Stage 3e: encoder_hid_proj ダミー追加 (Nunchaku 互換性) ──
         # 背景: Nunchaku PuLIDFluxPipeline は IP-Adapter コードパスで
@@ -526,12 +528,14 @@ class FluxA100PipelineManager:
                 from nunchaku.pipeline.pipeline_flux_pulid import PuLIDFluxPipeline
 
                 logger.info("  🚀 [3/5] PuLIDFluxPipeline 構築 (公式 PuLID 統合)")
+                _t_pulid_pipe = time.perf_counter()
                 self.pipe_base = PuLIDFluxPipeline.from_pretrained(
                     self.sys_cfg.base_model_repo,
                     transformer=self._shared_transformer,
                     torch_dtype=self.dtype,
                     low_cpu_mem_usage=True,  # 🥷 v7.2.1: メモリ効率重視ロード
                 )
+                logger.info(f"[BUILD-TIME] PuLIDFluxPipeline.from_pretrained: {time.perf_counter() - _t_pulid_pipe:.1f}s")
 
                 # 🥷 v7.2.1 Patch A.3: enable_model_cpu_offload を「条件付き」に
                 # A100 40GB (実測 21GB ピーク) では offload は速度を犠牲にするだけ。
@@ -684,6 +688,7 @@ class FluxA100PipelineManager:
         if self._controlnet_loaded:
             return
 
+        _t_cn_all = time.perf_counter()
         try:
             from diffusers import FluxControlNetModel, FluxControlNetPipeline
             from diffusers.models import FluxMultiControlNetModel  # noqa: F401
@@ -705,10 +710,12 @@ class FluxA100PipelineManager:
         logger.info(f"🎛️ [Stage 3b] ControlNet Union Pro 2.0 ロード: {cn_repo}")
         _c0_verify_hf_repo("controlnet", cn_repo)
 
+        _t_cn_model = time.perf_counter()
         self.controlnet_model = FluxControlNetModel.from_pretrained(
             cn_repo,
             torch_dtype=torch.bfloat16,
         ).to(self.device)
+        logger.info(f"[BUILD-TIME] controlnet_model.from_pretrained: {time.perf_counter() - _t_cn_model:.1f}s")
 
         # ─── 2. FluxControlNetPipeline 構築 (transformer 共有) ──
         # RECON-028 案B: AIBO_PULID_CN_NATIVE(既定 "1")で PuLIDFluxControlNetPipeline を採用。
@@ -730,6 +737,7 @@ class FluxA100PipelineManager:
             _CNetPipeCls = FluxControlNetPipeline
             logger.info("🚀 [Stage 3b] FluxControlNetPipeline 構築 (旧経路 · AIBO_PULID_CN_NATIVE=0)")
 
+        _t_cn_pipe = time.perf_counter()
         self.pipe_cnet = _CNetPipeCls.from_pretrained(
             self.sys_cfg.base_model_repo,
             controlnet=[self.controlnet_model],  # リスト渡しで auto-wrap
@@ -742,6 +750,7 @@ class FluxA100PipelineManager:
             scheduler=self.pipe_base.scheduler,
             torch_dtype=self.dtype,
         )
+        logger.info(f"[BUILD-TIME] pipe_cnet.from_pretrained: {time.perf_counter() - _t_cn_pipe:.1f}s")
 
         # ─── Stage 3e-4: pipe_cnet に components を pipe_base から借用 ──
         # 背景:
@@ -789,6 +798,7 @@ class FluxA100PipelineManager:
 
         self._controlnet_loaded = True
         logger.info("✅ [Stage 3b] ControlNet pipeline 構築完了 (Nunchaku 共有 · 公式 pulid_forward)")
+        logger.info(f"[BUILD-TIME] ensure_controlnet (total): {time.perf_counter() - _t_cn_all:.1f}s")
 
     def offload_main_pipelines_to_cpu(self):
         """
@@ -1343,6 +1353,7 @@ class FluxA100PipelineManager:
 
     def _build_i2i(self):
         """Pass 2 顔リファイン用の Img2Img パイプラインを構築 (transformer を共有)"""
+        _t0 = time.perf_counter()
         try:
             from diffusers import FluxImg2ImgPipeline
 
@@ -1359,6 +1370,7 @@ class FluxA100PipelineManager:
         except Exception as e:
             logger.warning(f"  ⚠️ I2I 構築失敗: {e}")
             self.pipe_i2i = None
+        logger.info(f"[BUILD-TIME] _build_i2i: {time.perf_counter() - _t0:.1f}s")
 
     # ─────────────────────────────────────────────────
     # 4.1.F · Redux Prior (画像参照)
@@ -1366,6 +1378,7 @@ class FluxA100PipelineManager:
 
     def _build_redux_prior(self):
         """Redux Prior (画像 → embedding) パイプラインを構築 (オプション)"""
+        _t0 = time.perf_counter()
         try:
             from diffusers import FluxPriorReduxPipeline
             from transformers import CLIPTokenizer, T5TokenizerFast
@@ -1392,6 +1405,7 @@ class FluxA100PipelineManager:
         except Exception as e:
             logger.warning(f"  ⚠️ Redux Prior 構築失敗 (画像参照なしで続行): {e}")
             self.pipe_prior = None
+        logger.info(f"[BUILD-TIME] _build_redux_prior: {time.perf_counter() - _t0:.1f}s")
 
     # ─────────────────────────────────────────────────
     # 4.1.G · VAE 最適化
@@ -1405,6 +1419,7 @@ class FluxA100PipelineManager:
         slicing は据置(OOM 回避・他デコード挙動は不変)。
         """
         global _ACTIVE_PIPE_MANAGER
+        _t0 = time.perf_counter()
         _ACTIVE_PIPE_MANAGER = self          # set_vae_tiling が live vae を触れるよう登録
         try:
             self.pipe_base.vae.enable_slicing()
@@ -1416,6 +1431,7 @@ class FluxA100PipelineManager:
             logger.info(f"  ✅ VAE slicing 有効化 / tiling={'有効' if want_tiling else '無効(env off)'}")
         except Exception as e:
             logger.info(f"  ℹ️ VAE 最適化スキップ: {e}")
+        logger.info(f"[BUILD-TIME] _enable_vae_optimizations: {time.perf_counter() - _t0:.1f}s")
 
     # ─────────────────────────────────────────────────
     # 4.1.H · 公開アクセサ
