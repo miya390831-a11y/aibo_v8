@@ -267,6 +267,11 @@ def apply_makeup_with_pipeline_manager(
                     strength=denoising,
                     guidance_scale=GUIDANCE_SCALE,
                     num_inference_steps=NUM_INFERENCE_STEPS,
+                    # ★主因C修正(2026-06-28): height/width 未指定だと FluxFill が既定 1024×1024 へ
+                    # アスペクト破壊リサイズし全身歪み・別人化を招く。入力 832×1216 を保持するため明示渡し。
+                    # image と face_mask は :218-219 で同サイズ済み(16の倍数制約: 832/16=52,1216/16=76 OK)。
+                    height=image.height,
+                    width=image.width,
                     generator=gen,
                 )
             out_img = out.images[0] if hasattr(out, "images") else out[0]
