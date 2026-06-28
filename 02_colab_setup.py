@@ -271,7 +271,12 @@ class DependencyInstaller:
         ("insightface",      None),
         ("facexlib",         None),
         ("timm",             None),
-        ("onnxruntime-gpu",  None),
+        # ★CPU 版固定(2026-06-28): onnxruntime-gpu は環境により libcudart.so.13(CUDA13)要求で
+        #   import 不可→FATAL。かつ install_all は非保護パッケージを毎ビルド無条件 pip install するため、
+        #   gpu を指定すると [Cell-deps] で入れた CPU 版を毎回上書きして再発させる(GATE① 系の沈黙再発)。
+        #   CPU 版を指定 → Cell-deps 導入済なら「already satisfied」で no-op・gpu を一切入れない。
+        #   insightface 顔検出は CPU で十分(実証済・944a9b8)。gpu-first は禁止。
+        ("onnxruntime",      None),
         ("ftfy",             None),       # ⚠️ PuLIDPipeline 内部で使用 (テキスト正規化)
         ("ultralytics",      None),       # ⚠️ Phase0Sniper の YOLO で使用
     ]

@@ -2,7 +2,7 @@
   "_comment": "AIBO core module md5 (newline-normalized LF). regen: python tools/gen_manifest.py  |  verify: tools/check_manifest.py",
   "modules": {
     "01_config.py": "c7d16e5d7366c80b56bcfa378f3c775a",
-    "02_colab_setup.py": "7e53e4ccef16454da1730178d61ab071",
+    "02_colab_setup.py": "2290775c3a3fbdeea79a9316258f4767",
     "03_identity_engine.py": "66e938c52a21f33c2629efa5fffe41c0",
     "04_pipeline_manager.py": "043b702234df1e2d1cd842afe7b66382",
     "05_orchestrator.py": "68d939afae4e52dcef837d0fa39ef682",
